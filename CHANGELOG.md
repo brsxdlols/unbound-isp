@@ -2,6 +2,14 @@
 
 ## 2026-08-31
 
+### Unbound ISP FULL v1.4
+- Troubleshooting validado em produção fixado na revisão `c85e77e01a52cbaea7b7a8b6f7abba255e7691b2`.
+- DNS1 e DNS2 passam a instalar automaticamente essa revisão estável.
+- Instalação posterior do Painel Web também garante o troubleshooting estável sem alterar a configuração do Unbound.
+- Agent mantém execução allowlisted de `/root/unbound-troubleshooting.sh` para modo normal, profundo e teste por domínio.
+- Revisão instalada registrada em `/etc/unbound-isp/troubleshooting.version`.
+- Menu de gerenciamento do painel permite reinstalar somente o troubleshooting estável.
+
 ### Unbound ISP FULL v1.3
 - Painel web opcional para DNS1.
 - Integração DNS2 via Agent.
