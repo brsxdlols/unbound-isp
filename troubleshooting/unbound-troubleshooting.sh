@@ -1,7 +1,22 @@
 #!/bin/bash
 set -u
 DEEP=0
-[ "${1:-}" = "--deep" ] && DEEP=1
+DOMAIN=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --deep) DEEP=1 ;;
+        --domain)
+            shift
+            DOMAIN="${1:-}"
+            ;;
+        *) echo "Parâmetro desconhecido: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+if [ -n "$DOMAIN" ] && ! [[ "$DOMAIN" =~ ^([A-Za-z0-9]([A-Za-z0-9_-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]; then
+    echo "ERRO: domínio inválido: $DOMAIN" >&2
+    exit 2
+fi
 DNS="127.0.0.1"
 TS="$(date '+%d/%m/%Y %H:%M:%S')"
 TMP="/tmp/unbound-troubleshooting.$$"
@@ -20,6 +35,7 @@ echo "============================================================"
 echo " UNBOUND ISP - TROUBLESHOOTING DNS"
 echo " $TS"
 echo " Modo: $([ "$DEEP" -eq 1 ] && echo PROFUNDO || echo NORMAL)"
+[ -n "$DOMAIN" ] && echo " Domínio direcionado: $DOMAIN"
 echo "============================================================"
 
 section "1 - SERVIÇO / PORTA 53"
@@ -79,8 +95,54 @@ section "9 - COMPARAÇÃO DE CONECTIVIDADE"
 for target in "LOCAL:$DNS" "CLOUDFLARE:1.1.1.1" "GOOGLE:8.8.8.8"; do name="${target%%:*}"; srv="${target#*:}"; if ms="$(dig_ms "$srv" example.com A)"; then echo "$name = ${ms} ms"; else echo "$name = FALHOU"; fi; done
 info "DNS externos são usados SOMENTE como comparação; não são configurados como forwarders."
 
+if [ -n "$DOMAIN" ]; then
+ section "10 - TESTE DIRECIONADO: $DOMAIN"
+ unbound-control flush "$DOMAIN" >/dev/null 2>&1 || true
+ A1="$(dig @"$DNS" "$DOMAIN" A +dnssec +time=5 +tries=1 +stats 2>/dev/null || true)"
+ S1="$(echo "$A1"|sed -n 's/.*status: \([^,]*\).*/\1/p'|head -1)"
+ T1D="$(echo "$A1"|awk '/Query time:/ {print $4;exit}')"
+ AN1="$(echo "$A1"|awk '/^;; ANSWER SECTION:/{f=1;next}/^$/{if(f)exit}f&&$4=="A"{c++}END{print c+0}')"
+ echo "A primeira consulta : status=${S1:-N/D} tempo=${T1D:-N/D} ms respostas=$AN1"
+ if [ "$S1" = "NOERROR" ]; then ok "$DOMAIN respondeu registro A."; else err "$DOMAIN falhou na consulta A: ${S1:-SEM RESPOSTA}."; fi
+
+ A2="$(dig @"$DNS" "$DOMAIN" A +dnssec +time=5 +tries=1 +stats 2>/dev/null || true)"
+ T2D="$(echo "$A2"|awk '/Query time:/ {print $4;exit}')"
+ echo "A segunda consulta  : tempo=${T2D:-N/D} ms"
+ if [ -n "${T1D:-}" ] && [ -n "${T2D:-}" ] && [ "$T2D" -le "$T1D" ]; then ok "Cache do domínio confirmado pela segunda consulta."; else warn "Cache do domínio não apresentou ganho de tempo claro."; fi
+
+ AAAA="$(dig @"$DNS" "$DOMAIN" AAAA +dnssec +time=5 +tries=1 +stats 2>/dev/null || true)"
+ S6="$(echo "$AAAA"|sed -n 's/.*status: \([^,]*\).*/\1/p'|head -1)"
+ T6="$(echo "$AAAA"|awk '/Query time:/ {print $4;exit}')"
+ echo "AAAA                : status=${S6:-N/D} tempo=${T6:-N/D} ms"
+ if [ "$S6" = "NOERROR" ] || [ "$S6" = "NXDOMAIN" ]; then ok "Consulta AAAA respondeu sem timeout."; else warn "Consulta AAAA retornou ${S6:-SEM RESPOSTA}."; fi
+
+ U="$(dig @"$DNS" "$DOMAIN" A +time=5 +tries=1 +stats 2>/dev/null || true)"
+ TU="$(echo "$U"|awk '/Query time:/ {print $4;exit}')"
+ if echo "$U"|grep -q 'status: NOERROR'; then ok "UDP/53 respondeu (${TU:-N/D} ms)."; else err "UDP/53 falhou para $DOMAIN."; fi
+ T="$(dig @"$DNS" "$DOMAIN" A +tcp +time=5 +tries=1 +stats 2>/dev/null || true)"
+ TT="$(echo "$T"|awk '/Query time:/ {print $4;exit}')"
+ if echo "$T"|grep -q 'status: NOERROR'; then ok "TCP/53 respondeu (${TT:-N/D} ms)."; else err "TCP/53 falhou para $DOMAIN."; fi
+
+ echo
+ echo "Comparação apenas para diagnóstico:"
+ for target in "LOCAL:$DNS" "CLOUDFLARE:1.1.1.1" "GOOGLE:8.8.8.8"; do
+   name="${target%%:*}"; srv="${target#*:}"
+   OUTD="$(dig @"$srv" "$DOMAIN" A +time=5 +tries=1 +stats 2>/dev/null || true)"
+   STD="$(echo "$OUTD"|sed -n 's/.*status: \([^,]*\).*/\1/p'|head -1)"
+   MSD="$(echo "$OUTD"|awk '/Query time:/ {print $4;exit}')"
+   echo "  $name -> status=${STD:-FALHOU} tempo=${MSD:-N/D} ms"
+ done
+ if echo "$A1"|grep -Eq 'flags:.*\bad\b'; then ok "Resposta A do domínio foi autenticada com flag AD."; else info "Resposta A não apresentou flag AD (isso pode ser normal se a zona não usar DNSSEC)."; fi
+
+ if [ "$DEEP" -eq 1 ]; then
+   echo
+   echo "Trace de delegação (resumo):"
+   dig "$DOMAIN" A +trace +time=3 +tries=1 2>/dev/null | grep -E '^[^;].*[[:space:]](NS|A|AAAA)[[:space:]]' | tail -25 || true
+ fi
+fi
+
 if [ "$DEEP" -eq 1 ]; then
- section "10 - ROOT / TLD / TCP (PROFUNDO)"
+ section "$([ -n "$DOMAIN" ] && echo 11 || echo 10) - ROOT / TLD / TCP (PROFUNDO)"
  ROOTIP="$(awk 'toupper($4)=="A"{print $5;exit}' /var/lib/unbound/root.hints 2>/dev/null || true)"
  if [ -n "$ROOTIP" ]; then if dig @"$ROOTIP" . NS +norecurse +time=3 +tries=1 >/dev/null 2>&1; then ok "Root server $ROOTIP acessível diretamente."; else warn "Falha consultando root server $ROOTIP diretamente."; fi; fi
  if dig @"$DNS" com. NS +dnssec +time=3 +tries=1 >/dev/null 2>&1; then ok "Delegação .COM acessível."; else err "Falha consultando .COM."; fi
