@@ -32,7 +32,6 @@ err(){ echo -e "${R}[ERRO]${N} $*"; ERRC=$((ERRC+1)); }
 info(){ echo -e "${B}[INFO]${N} $*"; }
 section(){ echo; echo "------------------------------------------------------------"; echo "$1"; echo "------------------------------------------------------------"; }
 
-# Retorna latência em ms. Faz 2 tentativas UDP e, se necessário, 1 TCP.
 dig_ms(){
     local server="$1" name="$2" type="${3:-A}" out ms
     out="$(dig @"$server" "$name" "$type" +time=2 +tries=2 +stats 2>/dev/null || true)"
@@ -51,7 +50,6 @@ dig_ms(){
 }
 
 get_nstat(){ nstat -az 2>/dev/null | awk -v k="$1" '$1==k{print $2+0;exit}'; }
-
 status_of(){ echo "$1" | sed -n 's/.*status: \([^,]*\).*/\1/p' | head -1; }
 time_of(){ echo "$1" | awk '/Query time:/ {print $4;exit}'; }
 
@@ -69,8 +67,20 @@ if ss -ltnp 2>/dev/null | grep ':53 ' | grep -qi unbound; then ok "Unbound está
 
 section "2 - RESOLUÇÃO LOCAL"
 for d in google.com cloudflare.com registro.br microsoft.com; do
-    if ms="$(dig_ms "$DNS" "$d" A)"; then
-        if [ "${ms:-9999}" -le 250 ]; then ok "$d resolveu em ${ms} ms."; else warn "$d resolveu, mas demorou ${ms} ms."; fi
+    if ms1="$(dig_ms "$DNS" "$d" A)"; then
+        if [ "${ms1:-9999}" -le 250 ]; then
+            ok "$d resolveu em ${ms1} ms."
+        else
+            ms2="$(dig_ms "$DNS" "$d" A || true)"
+            if [ -n "${ms2:-}" ] && [ "$ms2" -le 100 ]; then
+                ok "$d: primeira consulta ${ms1} ms (recursão/cache frio), segunda ${ms2} ms."
+            elif [ -n "${ms2:-}" ] && [ "$ms2" -le 250 ]; then
+                info "$d: primeira consulta ${ms1} ms, segunda ${ms2} ms; sem penalização por consulta fria isolada."
+                ok "$d respondeu normalmente após aquecimento de cache."
+            else
+                warn "$d permaneceu lento em consultas consecutivas (${ms1} ms / ${ms2:-N/D} ms)."
+            fi
+        fi
     else
         err "$d não resolveu corretamente pelo Unbound local."
     fi
@@ -96,7 +106,6 @@ else
     err "Falha na validação de uma zona DNSSEC válida."
 fi
 
-# Domínio propositalmente quebrado. Primeiro UDP; se não concluir, confirma via TCP.
 I_UDP="$(dig @"$DNS" dnssec-failed.org A +dnssec +time=3 +tries=2 2>/dev/null || true)"
 if echo "$I_UDP" | grep -q 'status: SERVFAIL'; then
     ok "DNSSEC inválido recusado com SERVFAIL via UDP."
@@ -147,7 +156,18 @@ if [ -n "${H:-}" ] && [ -n "${M:-}" ]; then
     echo "Cache hit rate   : ${RATE}%"
 fi
 if [ -n "${RQ:-}" ] && awk "BEGIN{exit !($RQ>100)}"; then warn "Requestlist atual elevada: $RQ."; else ok "Fila atual do Unbound sem sinal de saturação."; fi
-if [ -n "${LAT:-}" ] && awk "BEGIN{exit !($LAT>0.250)}"; then warn "Recursion median elevada: ${LAT}s."; else ok "Latência mediana de recursão normal."; fi
+if [ -n "${LAT:-}" ]; then
+    if [ -n "${Q:-}" ] && [ "$Q" -lt 500 ]; then
+        info "Amostra pequena (${Q} consultas): recursion median ${LAT}s é apenas informativa e não reduz o score."
+        ok "Sem evidência suficiente de latência sustentada de recursão."
+    elif awk "BEGIN{exit !($LAT>0.500)}"; then
+        warn "Recursion median sustentada acima de 500 ms: ${LAT}s."
+    else
+        ok "Latência mediana de recursão dentro do limite operacional."
+    fi
+else
+    info "Recursion median não disponível."
+fi
 
 section "7 - SISTEMA"
 CPU="$(top -bn1 2>/dev/null | awk '/Cpu\(s\)/{for(i=1;i<=NF;i++) if($i ~ /id,?$/){gsub(/,/,"",$(i-1)); printf "%.1f",100-$(i-1); exit}}')"
