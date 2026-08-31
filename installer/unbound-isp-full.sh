@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 # ============================================================
-# UNBOUND ISP FULL 1.3
+# UNBOUND ISP FULL 1.4
 # Instalador / Gerenciador único: DNS1, DNS2 e Painel opcional
 # Debian 11/12
 # ============================================================
@@ -11,15 +11,17 @@ DATA=/var/lib/unbound-isp
 LOG=/var/log/unbound-isp
 CONF=/etc/unbound/unbound.conf
 AGENT_PORT=9443
+TROUBLESHOOTING_REF="c85e77e01a52cbaea7b7a8b6f7abba255e7691b2"
 mkdir -p "$ETC" "$BASE" "$DATA" "$LOG" "$DATA/backups"
 
 install_troubleshooting() {
-    local url="https://raw.githubusercontent.com/brsxdlols/unbound-isp/main/troubleshooting/unbound-troubleshooting.sh"
+    local url="https://raw.githubusercontent.com/brsxdlols/unbound-isp/${TROUBLESHOOTING_REF}/troubleshooting/unbound-troubleshooting.sh"
     if ! curl -fsSL "$url" -o /root/unbound-troubleshooting.sh; then
-        echo "ERRO: não foi possível baixar o troubleshooting do projeto."
+        echo "ERRO: não foi possível baixar o troubleshooting estável do projeto."
         return 1
     fi
     chmod +x /root/unbound-troubleshooting.sh
+    printf '%s\n' "$TROUBLESHOOTING_REF" > "$ETC/troubleshooting.version"
 }
 
 die(){ echo "ERRO: $*" >&2; exit 1; }
@@ -50,8 +52,9 @@ EOF
 
 create_core(){
  local role="$1" node="$2"
+ packages
  install_troubleshooting
- packages; backup_unbound
+ backup_unbound
  if [ -s "$CONF" ] && unbound-checkconf "$CONF" >/dev/null 2>&1;then
    echo "Unbound existente e válido detectado."
    if yn "Manter configuração atual?" s;then ensure_control
@@ -228,6 +231,7 @@ install_agent(){
  if ! curl -fsSL "https://raw.githubusercontent.com/brsxdlols/unbound-isp/main/agent/unbound-isp-agent.py" -o "$dir/agent.py"; then
   die "Falha ao baixar Agent do repositório"
  fi
+ install_troubleshooting
  local key="$(openssl rand -hex 32)"
  cat > "$ETC/agent.env" <<EOF
 UNBOUND_ISP_NODE=$node
@@ -301,6 +305,7 @@ EOF
 
 install_panel(){
  packages
+ install_troubleshooting
  if [ ! -f "$ETC/node.conf" ];then
    command -v unbound >/dev/null || die "Unbound não encontrado"
    read -r -p "Nome deste DNS1 [$(hostname)]: " N;N="${N:-$(hostname)}"
@@ -364,6 +369,7 @@ WEB_PORT=$port
 EOF
  systemctl daemon-reload;systemctl enable --now unbound-isp-dashboard
  echo;echo "Painel: https://$(hostname -I|awk '{print $1}'):$port"
+ echo "Troubleshooting estável: $TROUBLESHOOTING_REF"
  if yn "Gerar código para integrar um DNS2 agora?" s;then generate_token;fi
 }
 
@@ -438,6 +444,7 @@ audit(){
 diagnostic(){
  clear
  install_troubleshooting
+ echo "Troubleshooting estável: $TROUBLESHOOTING_REF"
  echo "1 - Troubleshooting normal"
  echo "2 - Troubleshooting profundo"
  read -r -p "Opção [1]: " td; td="${td:-1}"
@@ -458,8 +465,8 @@ install_dns2(){
 manage_panel(){
  clear
  if [ ! -f "$ETC/panel.conf" ];then echo "Painel não instalado.";pause;return;fi
- echo "1 - Status";echo "2 - Reiniciar painel";echo "3 - Gerar código para DNS2";echo "0 - Voltar";read -r -p "Opção: " x
- case "$x" in 1) systemctl --no-pager status unbound-isp-dashboard|head -20||true;;2)systemctl restart unbound-isp-dashboard;echo OK;;3)generate_token;;esac
+ echo "1 - Status";echo "2 - Reiniciar painel";echo "3 - Gerar código para DNS2";echo "4 - Reinstalar troubleshooting estável";echo "0 - Voltar";read -r -p "Opção: " x
+ case "$x" in 1) systemctl --no-pager status unbound-isp-dashboard|head -20||true;;2)systemctl restart unbound-isp-dashboard;echo OK;;3)generate_token;;4)install_troubleshooting;echo "Troubleshooting estável reinstalado: $TROUBLESHOOTING_REF";;esac
  pause
 }
 pair_menu(){
@@ -473,7 +480,7 @@ pair_menu(){
 menu(){
  while true;do clear
  echo "============================================================"
- echo " UNBOUND ISP FULL 1.3 - INSTALADOR / GERENCIADOR"
+ echo " UNBOUND ISP FULL 1.4 - INSTALADOR / GERENCIADOR"
  echo "============================================================"
  echo "1 - Instalar / Configurar DNS1 PRINCIPAL"
  echo "2 - Instalar / Configurar DNS2 SECUNDÁRIO"
