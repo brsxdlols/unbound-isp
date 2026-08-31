@@ -14,7 +14,7 @@ API_KEY=os.environ["UNBOUND_ISP_API_KEY"]
 ALLOWED={x.strip() for x in os.getenv("UNBOUND_ISP_ALLOWED_IPS","127.0.0.1").split(",") if x.strip()}
 AUDIT=Path("/var/log/unbound-isp/agent-audit.log")
 
-app=FastAPI(title="Unbound ISP Agent",version="1.0",docs_url=None,redoc_url=None)
+app=FastAPI(title="Unbound ISP Agent",version="1.1",docs_url=None,redoc_url=None)
 
 SAFE_OPTIONS={
 "num-threads","so-reuseport","outgoing-range","num-queries-per-thread","so-rcvbuf","so-sndbuf",
@@ -98,8 +98,19 @@ def dns_test():
     result["dnssec_ad"]=bool(re.search(r"flags:.*\bad\b",out))
     m=re.search(r"Query time:\s+(\d+)\s+msec",out)
     result["query_ms"]=int(m.group(1)) if m else None
-    rc,out=run(["dig","@127.0.0.1","dnssec-failed.org","A","+dnssec","+time=3","+tries=1"],8)
-    result["dnssec_bogus_servfail"]="status: SERVFAIL" in out
+
+    rc,bogus=run(["dig","@127.0.0.1","dnssec-failed.org","A","+dnssec","+time=3","+tries=2"],10)
+    ok="status: SERVFAIL" in bogus
+    transport="udp"
+    if not ok:
+        rc,bogus_tcp=run(["dig","@127.0.0.1","dnssec-failed.org","A","+dnssec","+tcp","+time=4","+tries=1"],10)
+        if "status: SERVFAIL" in bogus_tcp:
+            ok=True
+            transport="tcp"
+        elif "timed out" in bogus or "no servers could be reached" in bogus:
+            transport="inconclusive"
+    result["dnssec_bogus_servfail"]=ok
+    result["dnssec_bogus_transport"]=transport
     return result
 
 def stats():
