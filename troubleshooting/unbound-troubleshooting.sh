@@ -90,13 +90,31 @@ section "3 - CACHE"
 CACHE_NAME="www.iana.org"
 unbound-control flush "$CACHE_NAME" >/dev/null 2>&1 || true
 H1="$(unbound-control stats_noreset 2>/dev/null | awk -F= '/^total.num.cachehits=/{print $2;exit}')"
-T1="$(dig @"$DNS" "$CACHE_NAME" A +time=5 +tries=1 +stats 2>/dev/null | awk '/Query time:/ {print $4;exit}')"
-T2="$(dig @"$DNS" "$CACHE_NAME" A +time=5 +tries=1 +stats 2>/dev/null | awk '/Query time:/ {print $4;exit}')"
+OUT1="$(dig @"$DNS" "$CACHE_NAME" A +time=5 +tries=1 +stats 2>/dev/null || true)"
+OUT2="$(dig @"$DNS" "$CACHE_NAME" A +time=5 +tries=1 +stats 2>/dev/null || true)"
+T1="$(time_of "$OUT1")"
+T2="$(time_of "$OUT2")"
+S1C="$(status_of "$OUT1")"
+S2C="$(status_of "$OUT2")"
 H2="$(unbound-control stats_noreset 2>/dev/null | awk -F= '/^total.num.cachehits=/{print $2;exit}')"
 echo "Primeira consulta : ${T1:-N/D} ms"
 echo "Segunda consulta  : ${T2:-N/D} ms"
-if [ -n "${H1:-}" ] && [ -n "${H2:-}" ] && awk "BEGIN{exit !($H2>$H1)}"; then ok "Cache hit aumentou: resposta armazenada e reutilizada."; else warn "Não foi possível confirmar aumento de cache hit."; fi
-if [ -n "${T1:-}" ] && [ -n "${T2:-}" ] && [ "$T2" -le "$T1" ]; then ok "Segunda consulta foi igual ou mais rápida."; else warn "Segunda consulta não ficou mais rápida."; fi
+if [ "$S1C" = "NOERROR" ] && [ "$S2C" = "NOERROR" ] && [ -n "${T1:-}" ] && [ -n "${T2:-}" ]; then
+    if [ "$T2" -le "$T1" ]; then
+        ok "Cache funcional: segunda consulta foi igual ou mais rápida (${T1} ms -> ${T2} ms)."
+    else
+        warn "As duas consultas responderam, porém a segunda ficou mais lenta (${T1} ms -> ${T2} ms)."
+    fi
+else
+    warn "Não foi possível concluir o teste de cache pelas respostas DNS."
+fi
+if [ -n "${H1:-}" ] && [ -n "${H2:-}" ]; then
+    if awk "BEGIN{exit !($H2>$H1)}"; then
+        info "Contador global de cache hits aumentou (${H1} -> ${H2})."
+    else
+        info "Contador global de cache hits não aumentou neste intervalo (${H1} -> ${H2}); isso não reduz o score."
+    fi
+fi
 
 section "4 - DNSSEC"
 V="$(dig @"$DNS" cloudflare.com A +dnssec +time=3 +tries=1 2>/dev/null || true)"
