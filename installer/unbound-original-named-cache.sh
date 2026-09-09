@@ -2,33 +2,67 @@
 set -e
 
 # ============================================================
-# UNBOUND - INSTALADOR ORIGINAL + NAMED.CACHE / ROOT.HINTS
-# Reexecução segura e idempotente
+# UNBOUND ISP - DNS RECURSIVO SEM PAINEL
+# Instalador / Atualizador seguro + named.cache + DNSSEC
+# Compatível com Debian 12/13
 # ============================================================
 
+VERSION="2.0"
 UNBOUND_CONF="/etc/unbound/unbound.conf"
+CONF_DIR="/etc/unbound/unbound.conf.d"
+DNSSEC_CONF="$CONF_DIR/root-auto-trust-anchor-file.conf"
+ROOT_KEY="/var/lib/unbound/root.key"
 ROOT_HINTS="/var/lib/unbound/root.hints"
 ROOT_HINTS_URL="https://www.internic.net/domain/named.cache"
 BACKUP_DIR="/root/unbound-backups"
+MANAGED_MARKER="/etc/unbound/.unbound-isp-managed"
+TROUBLESHOOTING_REF="c85e77e01a52cbaea7b7a8b6f7abba255e7691b2"
 
-echo "============================================================"
-echo " Unbound - Instalador / Atualizador"
-echo " named.cache (root hints) automático"
-echo "============================================================"
-echo
+banner() {
+    echo "============================================================"
+    echo " UNBOUND ISP - DNS RECURSIVO SEM PAINEL v$VERSION"
+    echo " named.cache + DNSSEC + troubleshooting"
+    echo "============================================================"
+    echo
+}
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "ERRO: execute este script como root."
     exit 1
 fi
 
+banner
+mkdir -p "$BACKUP_DIR"
+touch /etc/modules /etc/sysctl.conf
+
+ensure_download_tool() {
+    if command -v curl >/dev/null 2>&1; then DOWNLOAD_TOOL="curl"; return; fi
+    if command -v wget >/dev/null 2>&1; then DOWNLOAD_TOOL="wget"; return; fi
+    echo "[INFO] curl/wget não encontrado. Instalando curl..."
+    apt-get update
+    apt-get install -y curl ca-certificates
+    DOWNLOAD_TOOL="curl"
+}
+
+fetch_to() {
+    local URL="$1" DEST="$2"
+    ensure_download_tool
+    if [ "$DOWNLOAD_TOOL" = "curl" ]; then
+        curl -fsSL --connect-timeout 15 --max-time 60 "$URL" -o "$DEST"
+    else
+        wget -q --timeout=60 "$URL" -O "$DEST"
+    fi
+}
+
 install_troubleshooting() {
-    local url="https://raw.githubusercontent.com/brsxdlols/unbound-isp/main/troubleshooting/unbound-troubleshooting.sh"
-    if ! curl -fsSL "$url" -o /root/unbound-troubleshooting.sh; then
+    local URL="https://raw.githubusercontent.com/brsxdlols/unbound-isp/${TROUBLESHOOTING_REF}/troubleshooting/unbound-troubleshooting.sh"
+    echo "[INFO] Instalando troubleshooting estável..."
+    if ! fetch_to "$URL" /root/unbound-troubleshooting.sh; then
         echo "ERRO: não foi possível baixar o troubleshooting do projeto."
         return 1
     fi
     chmod +x /root/unbound-troubleshooting.sh
+    echo "[OK] Troubleshooting instalado."
 }
 
 ensure_module() {
@@ -43,73 +77,9 @@ ensure_module() {
 }
 
 set_sysctl_value() {
-    local KEY="$1"
-    local VALUE="$2"
+    local KEY="$1" VALUE="$2"
     sed -i -E "/^[[:space:]]*${KEY//./\\.}[[:space:]]*=/d" /etc/sysctl.conf
     echo "$KEY = $VALUE" >> /etc/sysctl.conf
-}
-
-ensure_download_tool() {
-    if command -v curl >/dev/null 2>&1; then DOWNLOAD_TOOL="curl"; return; fi
-    if command -v wget >/dev/null 2>&1; then DOWNLOAD_TOOL="wget"; return; fi
-    echo "[INFO] curl/wget não encontrado. Instalando somente curl..."
-    apt-get update
-    apt-get install -y curl ca-certificates
-    DOWNLOAD_TOOL="curl"
-}
-
-download_root_hints() {
-    local TMP
-    TMP="$(mktemp)"
-    ensure_download_tool
-    echo
-    echo "=== Atualizando named.cache / root hints ==="
-    echo "Fonte: $ROOT_HINTS_URL"
-    if [ "$DOWNLOAD_TOOL" = "curl" ]; then
-        curl -fsSL --connect-timeout 15 --max-time 30 "$ROOT_HINTS_URL" -o "$TMP"
-    else
-        wget -q --timeout=30 "$ROOT_HINTS_URL" -O "$TMP"
-    fi
-    if [ ! -s "$TMP" ]; then rm -f "$TMP"; echo "ERRO: named.cache baixado está vazio."; exit 1; fi
-    if [ "$(wc -c < "$TMP")" -lt 1000 ]; then rm -f "$TMP"; echo "ERRO: named.cache baixado parece incompleto."; exit 1; fi
-    if ! grep -Eq '[[:space:]]NS[[:space:]]+[A-M]\.ROOT-SERVERS\.NET\.' "$TMP"; then
-        rm -f "$TMP"; echo "ERRO: conteúdo baixado não parece ser um named.cache válido."; exit 1
-    fi
-    mkdir -p /var/lib/unbound
-    if [ -f "$ROOT_HINTS" ] && cmp -s "$TMP" "$ROOT_HINTS"; then
-        echo "[OK] named.cache já está atualizado."
-        rm -f "$TMP"
-        ROOT_HINTS_CHANGED="no"
-    else
-        install -o unbound -g unbound -m 0644 "$TMP" "$ROOT_HINTS"
-        rm -f "$TMP"
-        echo "[OK] named.cache atualizado em: $ROOT_HINTS"
-        ROOT_HINTS_CHANGED="yes"
-    fi
-}
-
-ensure_root_hints_directive() {
-    ROOT_HINTS_CONFIG_CHANGED="no"
-    if grep -Eq '^[[:space:]]*root-hints:[[:space:]]*"/var/lib/unbound/root\.hints"' "$UNBOUND_CONF"; then
-        echo "[OK] root-hints já configurado no Unbound."
-        return
-    fi
-    mkdir -p "$BACKUP_DIR"
-    local BKP="$BACKUP_DIR/unbound.conf-before-root-hints-$(date +%Y%m%d-%H%M%S)"
-    cp -a "$UNBOUND_CONF" "$BKP"
-    echo "[INFO] Adicionando root-hints ao bloco server..."
-    sed -i '/^[[:space:]]*server:[[:space:]]*$/a\    root-hints: "/var/lib/unbound/root.hints"' "$UNBOUND_CONF"
-    if ! grep -Eq '^[[:space:]]*root-hints:[[:space:]]*"/var/lib/unbound/root\.hints"' "$UNBOUND_CONF"; then
-        cp -a "$BKP" "$UNBOUND_CONF"; echo "ERRO: não foi possível inserir root-hints."; exit 1
-    fi
-    if ! unbound-checkconf "$UNBOUND_CONF"; then
-        echo; echo "ERRO: configuração ficou inválida. Restaurando backup..."
-        cp -a "$BKP" "$UNBOUND_CONF"
-        unbound-checkconf "$UNBOUND_CONF" || true
-        exit 1
-    fi
-    ROOT_HINTS_CONFIG_CHANGED="yes"
-    echo "[OK] root-hints incluído."
 }
 
 apply_kernel_tuning() {
@@ -118,6 +88,7 @@ apply_kernel_tuning() {
     ensure_module tcp_illinois
     ensure_module tcp_westwood
     ensure_module tcp_htcp
+
     echo
     echo "=== Ajustes de kernel e rede ==="
     set_sysctl_value vm.swappiness 5
@@ -146,82 +117,312 @@ apply_kernel_tuning() {
     echo "[OK] Sysctl aplicado sem duplicar chaves."
 }
 
+download_root_hints() {
+    local TMP
+    TMP="$(mktemp)"
+    echo
+    echo "=== Atualizando named.cache / root hints ==="
+    echo "Fonte: $ROOT_HINTS_URL"
+    fetch_to "$ROOT_HINTS_URL" "$TMP"
+
+    if [ ! -s "$TMP" ]; then
+        rm -f "$TMP"
+        echo "ERRO: named.cache baixado está vazio."
+        exit 1
+    fi
+    if [ "$(wc -c < "$TMP")" -lt 1000 ]; then
+        rm -f "$TMP"
+        echo "ERRO: named.cache baixado parece incompleto."
+        exit 1
+    fi
+    if ! grep -Eq '[[:space:]]NS[[:space:]]+[A-M]\.ROOT-SERVERS\.NET\.' "$TMP"; then
+        rm -f "$TMP"
+        echo "ERRO: conteúdo baixado não parece ser um named.cache válido."
+        exit 1
+    fi
+
+    mkdir -p /var/lib/unbound
+    if [ -f "$ROOT_HINTS" ] && cmp -s "$TMP" "$ROOT_HINTS"; then
+        echo "[OK] named.cache já está atualizado."
+        rm -f "$TMP"
+        ROOT_HINTS_CHANGED="no"
+    else
+        install -o unbound -g unbound -m 0644 "$TMP" "$ROOT_HINTS"
+        rm -f "$TMP"
+        echo "[OK] named.cache atualizado em: $ROOT_HINTS"
+        ROOT_HINTS_CHANGED="yes"
+    fi
+}
+
+backup_config() {
+    if [ -s "$UNBOUND_CONF" ]; then
+        local BKP="$BACKUP_DIR/unbound.conf-$(date +%Y%m%d-%H%M%S)"
+        cp -a "$UNBOUND_CONF" "$BKP"
+        LAST_BACKUP="$BKP"
+        echo "[OK] Backup: $BKP"
+    else
+        LAST_BACKUP=""
+    fi
+}
+
+restore_backup_if_possible() {
+    if [ -n "${LAST_BACKUP:-}" ] && [ -f "$LAST_BACKUP" ]; then
+        echo "[INFO] Restaurando configuração anterior..."
+        cp -a "$LAST_BACKUP" "$UNBOUND_CONF"
+        unbound-checkconf "$UNBOUND_CONF" >/dev/null 2>&1 && systemctl restart unbound || true
+        echo "[OK] Backup restaurado: $LAST_BACKUP"
+    fi
+}
+
+is_managed_install() {
+    [ -f "$MANAGED_MARKER" ] && return 0
+    [ -s "$UNBOUND_CONF" ] && grep -qE 'Unbound - Gerado automaticamente|UNBOUND ISP - GERENCIADO' "$UNBOUND_CONF" && return 0
+    return 1
+}
+
+ensure_dnssec_root_key() {
+    mkdir -p "$CONF_DIR" /var/lib/unbound
+
+    if [ ! -s "$ROOT_KEY" ]; then
+        if [ -s /usr/share/dns/root.key ]; then
+            install -o unbound -g unbound -m 0644 /usr/share/dns/root.key "$ROOT_KEY"
+            echo "[OK] root.key inicial criado a partir do pacote Debian."
+        else
+            echo "ERRO: root.key não existe e /usr/share/dns/root.key não está disponível."
+            return 1
+        fi
+    else
+        chown unbound:unbound "$ROOT_KEY"
+        chmod 0644 "$ROOT_KEY"
+        echo "[OK] root.key presente."
+    fi
+
+    if [ ! -s "$DNSSEC_CONF" ] || ! grep -Eq '^[[:space:]]*auto-trust-anchor-file:[[:space:]]*"/var/lib/unbound/root\.key"' "$DNSSEC_CONF"; then
+        cat > "$DNSSEC_CONF" <<'EOF'
+server:
+    auto-trust-anchor-file: "/var/lib/unbound/root.key"
+EOF
+        chown root:root "$DNSSEC_CONF"
+        chmod 0644 "$DNSSEC_CONF"
+        echo "[OK] Configuração do trust anchor criada: $DNSSEC_CONF"
+        DNSSEC_CONFIG_CHANGED="yes"
+    else
+        echo "[OK] Trust anchor já configurado em $DNSSEC_CONF"
+    fi
+}
+
+ensure_conf_d_include() {
+    INCLUDE_CONFIG_CHANGED="no"
+
+    if grep -Eq '^[[:space:]]*(include|include-toplevel):[[:space:]]*"?/etc/unbound/unbound\.conf\.d/\*\.conf"?' "$UNBOUND_CONF"; then
+        echo "[OK] Diretório unbound.conf.d já incluído na configuração principal."
+        return 0
+    fi
+
+    echo >> "$UNBOUND_CONF"
+    echo '# Configuracoes adicionais Debian / Unbound ISP' >> "$UNBOUND_CONF"
+    echo 'include: "/etc/unbound/unbound.conf.d/*.conf"' >> "$UNBOUND_CONF"
+    INCLUDE_CONFIG_CHANGED="yes"
+    echo "[OK] Include do Debian/Unbound ISP adicionado ao unbound.conf."
+}
+
+ensure_root_hints_directive() {
+    ROOT_HINTS_CONFIG_CHANGED="no"
+    if grep -Eq '^[[:space:]]*root-hints:[[:space:]]*"/var/lib/unbound/root\.hints"' "$UNBOUND_CONF"; then
+        echo "[OK] root-hints já configurado no Unbound."
+        return
+    fi
+
+    echo "[INFO] Adicionando root-hints ao bloco server..."
+    sed -i '/^[[:space:]]*server:[[:space:]]*$/a\    root-hints: "/var/lib/unbound/root.hints"' "$UNBOUND_CONF"
+    if ! grep -Eq '^[[:space:]]*root-hints:[[:space:]]*"/var/lib/unbound/root\.hints"' "$UNBOUND_CONF"; then
+        echo "ERRO: não foi possível inserir root-hints."
+        return 1
+    fi
+    ROOT_HINTS_CONFIG_CHANGED="yes"
+    echo "[OK] root-hints incluído."
+}
+
+validate_and_restart() {
+    echo
+    echo "=== Validação da configuração ==="
+    if ! unbound-checkconf "$UNBOUND_CONF"; then
+        echo "ERRO: configuração inválida."
+        restore_backup_if_possible
+        return 1
+    fi
+
+    systemctl enable unbound >/dev/null 2>&1 || true
+    if ! systemctl restart unbound; then
+        echo "ERRO: falha ao reiniciar o Unbound."
+        restore_backup_if_possible
+        return 1
+    fi
+    sleep 3
+
+    if ! systemctl is-active --quiet unbound; then
+        echo "ERRO: serviço Unbound não está ativo."
+        restore_backup_if_possible
+        return 1
+    fi
+    echo "[OK] Unbound ativo."
+}
+
+validate_dnssec() {
+    echo
+    echo "=== Validação obrigatória do DNSSEC ==="
+
+    local TRUST VALID BAD BAD_TCP
+    TRUST="$(unbound-control get_option auto-trust-anchor-file 2>/dev/null || true)"
+    if ! printf '%s' "$TRUST" | grep -q '/var/lib/unbound/root.key'; then
+        echo "[ERRO] Trust anchor não está ativo no Unbound."
+        echo "       Retorno: ${TRUST:-<vazio>}"
+        return 1
+    fi
+    echo "[OK] Trust anchor ativo: /var/lib/unbound/root.key"
+
+    unbound-control flush_zone . >/dev/null 2>&1 || true
+
+    VALID="$(dig @127.0.0.1 cloudflare.com A +dnssec +time=5 +tries=1 2>/dev/null || true)"
+    if printf '%s\n' "$VALID" | grep -q 'status: NOERROR' && \
+       printf '%s\n' "$VALID" | grep -Eq 'flags:.*[[:space:]]ad([[:space:];]|$)'; then
+        echo "[OK] DNSSEC válido: cloudflare.com = NOERROR + AD."
+    else
+        echo "[ERRO] Zona DNSSEC válida não retornou NOERROR + AD."
+        return 1
+    fi
+
+    BAD="$(dig @127.0.0.1 dnssec-failed.org A +dnssec +time=5 +tries=1 2>/dev/null || true)"
+    if printf '%s\n' "$BAD" | grep -q 'status: SERVFAIL'; then
+        echo "[OK] DNSSEC inválido: dnssec-failed.org = SERVFAIL via UDP."
+        return 0
+    fi
+
+    echo "[INFO] UDP não retornou SERVFAIL; confirmando via TCP..."
+    BAD_TCP="$(dig @127.0.0.1 dnssec-failed.org A +dnssec +tcp +time=5 +tries=1 2>/dev/null || true)"
+    if printf '%s\n' "$BAD_TCP" | grep -q 'status: SERVFAIL'; then
+        echo "[OK] DNSSEC inválido: dnssec-failed.org = SERVFAIL via TCP."
+        return 0
+    fi
+
+    echo "[ERRO] dnssec-failed.org não retornou SERVFAIL nem via UDP nem via TCP."
+    return 1
+}
+
 existing_install_update() {
-    install_troubleshooting
     echo "============================================================"
-    echo " Unbound já instalado detectado"
+    echo " Unbound ISP já configurado detectado"
     echo " MODO: ATUALIZAÇÃO SEGURA"
     echo "============================================================"
     echo
     echo "O instalador NÃO irá:"
-    echo " - sobrescrever sua configuração atual"
-    echo " - pedir CPU/RAM novamente"
+    echo " - sobrescrever parâmetros existentes de CPU/RAM/cache"
     echo " - pedir ACL IPv4/IPv6 novamente"
     echo " - reinstalar o Unbound"
-    echo " - duplicar módulos/sysctl"
     echo
-    echo "Será atualizado:"
-    echo " - módulos/sysctl, mantendo uma única entrada"
+    echo "Será garantido:"
+    echo " - módulos/sysctl sem duplicação"
     echo " - named.cache / root.hints"
-    echo " - diretiva root-hints, somente se estiver faltando"
+    echo " - include de /etc/unbound/unbound.conf.d/*.conf"
+    echo " - root.key / trust anchor DNSSEC"
+    echo " - validação NOERROR+AD e SERVFAIL"
     echo
+
     if ! unbound-checkconf "$UNBOUND_CONF"; then
-        echo; echo "ERRO: configuração atual do Unbound já está inválida."
-        echo "Nada será alterado no unbound.conf."
+        echo "ERRO: configuração atual do Unbound já está inválida."
+        echo "Nenhuma alteração será aplicada."
         exit 1
     fi
+
+    backup_config
     apply_kernel_tuning
+    install_troubleshooting
+
     ROOT_HINTS_CHANGED="no"
     ROOT_HINTS_CONFIG_CHANGED="no"
+    DNSSEC_CONFIG_CHANGED="no"
+    INCLUDE_CONFIG_CHANGED="no"
+
     download_root_hints
-    ensure_root_hints_directive
-    chown unbound:unbound "$UNBOUND_CONF"
-    chown unbound:unbound "$ROOT_HINTS"
-    echo
-    echo "=== Validação final ==="
-    unbound-checkconf "$UNBOUND_CONF"
-    if [ "$ROOT_HINTS_CHANGED" = "yes" ] || [ "$ROOT_HINTS_CONFIG_CHANGED" = "yes" ]; then
-        echo "[INFO] Aplicando atualização no Unbound..."
-        systemctl restart unbound
-    else
-        echo "[OK] Nenhuma alteração de Unbound necessária."
+    ensure_root_hints_directive || { restore_backup_if_possible; exit 1; }
+    ensure_dnssec_root_key || { restore_backup_if_possible; exit 1; }
+    ensure_conf_d_include
+
+    chown unbound:unbound "$UNBOUND_CONF" "$ROOT_HINTS"
+
+    validate_and_restart || exit 1
+
+    if ! validate_dnssec; then
+        echo
+        echo "ERRO: atualização NÃO será considerada concluída porque o DNSSEC falhou."
+        restore_backup_if_possible
+        exit 1
     fi
-    if ! systemctl is-active --quiet unbound; then echo "ERRO: serviço Unbound não está ativo."; exit 1; fi
-    echo
-    echo "=== Teste DNS ==="
-    dig google.com @127.0.0.1 +time=3 +tries=1 | grep -E "status:|Query time" || true
+
+    touch "$MANAGED_MARKER"
+    printf 'version=%s\nupdated=%s\n' "$VERSION" "$(date -Iseconds)" > "$MANAGED_MARKER"
+
     echo
     echo "=============================================="
-    echo " ATUALIZAÇÃO CONCLUÍDA"
+    echo " ATUALIZAÇÃO CONCLUÍDA COM SUCESSO"
+    echo " DNSSEC: VALIDADO"
     echo " named.cache: $ROOT_HINTS"
-    echo " unbound.conf preservado"
-    echo " =============================================="
+    echo " unbound.conf: preservado + garantias aplicadas"
+    echo "=============================================="
     echo
+
     read -p "Deseja executar o troubleshooting completo agora? (S/n): " RUN_TS
     RUN_TS="${RUN_TS:-S}"
     if [[ "$RUN_TS" =~ ^[Ss]$ ]]; then /root/unbound-troubleshooting.sh; fi
     exit 0
 }
 
+# -----------------------------------------------------------------
+# Detecção segura: pacote instalado NÃO significa instalação nossa.
+# -----------------------------------------------------------------
 if command -v unbound >/dev/null 2>&1 && command -v unbound-checkconf >/dev/null 2>&1 && [ -s "$UNBOUND_CONF" ]; then
-    existing_install_update
+    if is_managed_install; then
+        existing_install_update
+    fi
+
+    echo "Foi encontrado um Unbound instalado, mas a configuração NÃO foi"
+    echo "identificada como uma instalação gerenciada pelo Unbound ISP."
+    echo
+    echo "Isso é comum em Debian 12/13 quando o pacote já existe com a"
+    echo "configuração padrão da distribuição."
+    echo
+    echo "A configuração atual será salva em backup antes de qualquer troca."
+    read -p "Deseja instalar a configuração COMPLETA do Unbound ISP agora? (s/N): " REPLACE_EXISTING
+    if [[ ! "$REPLACE_EXISTING" =~ ^[Ss]$ ]]; then
+        echo "Instalação cancelada. Nenhuma configuração foi sobrescrita."
+        exit 0
+    fi
+    backup_config
 fi
 
-echo "Nenhuma instalação existente do Unbound foi detectada."
 echo "Executando instalação completa..."
 echo
 
-touch /etc/modules
-touch /etc/sysctl.conf
 apply_kernel_tuning
 
-apt update
-apt install unbound dnstop dnsutils -y
+apt-get update
+apt-get install -y unbound dnstop dnsutils curl ca-certificates
+
+install_troubleshooting
 
 echo
- echo "=== Parâmetros da VM ==="
+echo "=== Parâmetros da VM ==="
 read -p "Quantos núcleos de CPU a VM possui? " CPU
 read -p "Quantos GB de RAM a VM possui? " RAM_GB
+
+if ! [[ "$CPU" =~ ^[0-9]+$ ]] || [ "$CPU" -lt 1 ]; then
+    echo "ERRO: quantidade de CPU inválida."
+    exit 1
+fi
+if ! [[ "$RAM_GB" =~ ^[0-9]+$ ]] || [ "$RAM_GB" -lt 1 ]; then
+    echo "ERRO: quantidade de RAM inválida."
+    exit 1
+fi
 
 echo
 read -p "Deseja habilitar IPv6 no Unbound? (s/n): " USE_IPV6
@@ -243,11 +444,13 @@ if [[ "$USE_IPV6" =~ ^[Ss]$ ]]; then
         echo "=============================================="
         if [ -n "$IPV6_BLOCKS" ]; then
             printf "%s" "$IPV6_BLOCKS" | sed 's/^[[:space:]]*access-control:[[:space:]]*/ - /; s/[[:space:]]allow$//'
-        else echo " - Nenhuma rede IPv6 adicional informada"; fi
+        else
+            echo " - Nenhuma rede IPv6 adicional informada"
+        fi
         echo "=============================================="
         read -p "As redes IPv6 acima estão corretas? (s/n): " IPV6_OK
         if [[ "$IPV6_OK" =~ ^[Ss]$ ]]; then break; fi
-        echo; echo "OK. Vamos informar as redes IPv6 novamente."
+        echo "OK. Vamos informar as redes IPv6 novamente."
     done
 else
     DO_IPV6="no"
@@ -265,6 +468,7 @@ while true; do
     echo
     read -p "Escolha [1]: " IPV4_MODE
     IPV4_MODE="${IPV4_MODE:-1}"
+
     if [ "$IPV4_MODE" = "2" ]; then
         echo
         echo "ATENÇÃO:"
@@ -279,6 +483,7 @@ while true; do
             IPV4_MODE="1"
         fi
     fi
+
     if [ "$IPV4_MODE" = "1" ]; then
         echo
         echo "Digite os blocos IPv4 permitidos (ENTER vazio para finalizar):"
@@ -288,35 +493,46 @@ while true; do
             ALLOW_IPS+="    access-control: $IP allow"$'\n'
         done
     fi
+
     echo
     echo "=============================================="
     echo " Redes IPv4 informadas"
     echo "=============================================="
     if [ -n "$ALLOW_IPS" ]; then
         printf "%s" "$ALLOW_IPS" | sed 's/^[[:space:]]*access-control:[[:space:]]*/ - /; s/[[:space:]]allow$//'
-    else echo " - Nenhuma rede adicional informada"; fi
+    else
+        echo " - Nenhuma rede adicional informada"
+    fi
     echo "=============================================="
     read -p "As redes IPv4 acima estão corretas? (s/n): " IPV4_OK
     if [[ "$IPV4_OK" =~ ^[Ss]$ ]]; then break; fi
-    echo; echo "OK. Vamos informar as redes IPv4 novamente."
+    echo "OK. Vamos informar as redes IPv4 novamente."
 done
 
 MSG_CACHE=$((RAM_GB * 512))
 RRSET_CACHE=$((RAM_GB * 256))
-if (( CPU <= 2 )); then SLABS=2
-elif (( CPU <= 4 )); then SLABS=4
-elif (( CPU <= 8 )); then SLABS=8
-else SLABS=16
+if (( CPU <= 2 )); then
+    SLABS=2
+elif (( CPU <= 4 )); then
+    SLABS=4
+elif (( CPU <= 8 )); then
+    SLABS=8
+else
+    SLABS=16
 fi
 
 ROOT_HINTS_CHANGED="no"
 download_root_hints
 
+backup_config
+
 echo
- echo "Gerando configuração do Unbound..."
-cat << EOF > "$UNBOUND_CONF"
+echo "Gerando configuração do Unbound..."
+cat > "$UNBOUND_CONF" <<EOF
 # ==========================================
+# UNBOUND ISP - GERENCIADO
 # Unbound - Gerado automaticamente
+# Versao do instalador: $VERSION
 # ==========================================
 
 server:
@@ -386,48 +602,67 @@ auth-zone:
     for-downstream: no
     for-upstream: yes
     zonefile: "/var/lib/unbound/root.zone"
+
+# Configuracoes adicionais Debian / Unbound ISP
+include: "/etc/unbound/unbound.conf.d/*.conf"
 EOF
 
-chown unbound:unbound "$UNBOUND_CONF"
-chown unbound:unbound "$ROOT_HINTS"
+chown unbound:unbound "$UNBOUND_CONF" "$ROOT_HINTS"
+
+DNSSEC_CONFIG_CHANGED="no"
+ensure_dnssec_root_key || { restore_backup_if_possible; exit 1; }
+
+validate_and_restart || exit 1
+
+if ! validate_dnssec; then
+    echo
+    echo "============================================================"
+    echo " INSTALAÇÃO NÃO CONCLUÍDA"
+    echo " DNSSEC não passou na validação obrigatória."
+    echo " A configuração anterior será restaurada quando houver backup."
+    echo "============================================================"
+    restore_backup_if_possible
+    exit 1
+fi
 
 echo
- echo "Testando configuração do Unbound..."
-if ! unbound-checkconf "$UNBOUND_CONF"; then echo; echo "ERRO: configuração inválida."; exit 1; fi
-systemctl enable unbound
-systemctl restart unbound
-
-echo
- echo "Configurando /etc/resolv.conf para DNS local..."
-cat << EOF > /etc/resolv.conf
+echo "Configurando /etc/resolv.conf para DNS local..."
+cat > /etc/resolv.conf <<'EOF'
 nameserver 127.0.0.1
 options timeout:1 attempts:3
 EOF
 
-install_troubleshooting
+touch "$MANAGED_MARKER"
+printf 'version=%s\ninstalled=%s\n' "$VERSION" "$(date -Iseconds)" > "$MANAGED_MARKER"
 
 echo
- echo "=== Testes DNS (cache) ==="
-echo "Primeira consulta (sem cache):"
-dig google.com @127.0.0.1 | grep "Query time" || true
-echo "Segunda consulta (com cache):"
-dig google.com @127.0.0.1 | grep "Query time" || true
+echo "=== Testes DNS (cache) ==="
+echo "Primeira consulta:"
+dig google.com @127.0.0.1 +time=5 +tries=1 | grep "Query time" || true
+echo "Segunda consulta:"
+dig google.com @127.0.0.1 +time=5 +tries=1 | grep "Query time" || true
 
 echo
- echo "=== named.cache / root hints ==="
-echo "Arquivo: $ROOT_HINTS"
-echo "Linhas: $(wc -l < "$ROOT_HINTS")"
-echo "Tamanho: $(wc -c < "$ROOT_HINTS") bytes"
+echo "=== named.cache / root hints ==="
+echo "Arquivo : $ROOT_HINTS"
+echo "Linhas  : $(wc -l < "$ROOT_HINTS")"
+echo "Tamanho : $(wc -c < "$ROOT_HINTS") bytes"
 
 echo
- echo "=============================================="
-echo " Unbound instalado e funcionando"
-echo " IPv6 habilitado: $DO_IPV6"
-echo " CPU: $CPU | RAM: ${RAM_GB}GB"
+echo "=============================================="
+echo " INSTALAÇÃO CONCLUÍDA COM SUCESSO"
+echo " Unbound: ATIVO"
+echo " DNSSEC : VALIDADO (NOERROR+AD / SERVFAIL)"
+echo " IPv6   : $DO_IPV6"
+echo " CPU    : $CPU"
+echo " RAM    : ${RAM_GB}GB"
 echo " named.cache: ATIVO"
+echo " Painel : NÃO INSTALADO"
 echo "=============================================="
 
 echo
 read -p "Deseja executar o troubleshooting completo agora? (S/n): " RUN_TS
 RUN_TS="${RUN_TS:-S}"
-if [[ "$RUN_TS" =~ ^[Ss]$ ]]; then /root/unbound-troubleshooting.sh; fi
+if [[ "$RUN_TS" =~ ^[Ss]$ ]]; then
+    /root/unbound-troubleshooting.sh
+fi
