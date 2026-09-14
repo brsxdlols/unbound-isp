@@ -7,7 +7,7 @@ set -e
 # Compatível com Debian 12/13
 # ============================================================
 
-VERSION="2.1"
+VERSION="2.2"
 UNBOUND_CONF="/etc/unbound/unbound.conf"
 CONF_DIR="/etc/unbound/unbound.conf.d"
 DNSSEC_CONF="$CONF_DIR/root-auto-trust-anchor-file.conf"
@@ -657,7 +657,12 @@ EOF
 chown unbound:unbound "$UNBOUND_CONF" "$ROOT_HINTS"
 
 DNSSEC_CONFIG_CHANGED="no"
+INCLUDE_CONFIG_CHANGED="no"
 ensure_dnssec_root_key || { restore_backup_if_possible; exit 1; }
+
+# Obrigatório também em instalação nova: o trust anchor do Debian fica
+# em /etc/unbound/unbound.conf.d e precisa estar incluído na config ativa.
+ensure_conf_d_include || { restore_backup_if_possible; exit 1; }
 
 validate_and_restart || exit 1
 
