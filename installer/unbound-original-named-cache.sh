@@ -7,7 +7,7 @@ set -e
 # Compatível com Debian 12/13
 # ============================================================
 
-VERSION="2.0"
+VERSION="2.1"
 UNBOUND_CONF="/etc/unbound/unbound.conf"
 CONF_DIR="/etc/unbound/unbound.conf.d"
 DNSSEC_CONF="$CONF_DIR/root-auto-trust-anchor-file.conf"
@@ -380,24 +380,71 @@ existing_install_update() {
 # -----------------------------------------------------------------
 # Detecção segura: pacote instalado NÃO significa instalação nossa.
 # -----------------------------------------------------------------
-if command -v unbound >/dev/null 2>&1 && command -v unbound-checkconf >/dev/null 2>&1 && [ -s "$UNBOUND_CONF" ]; then
-    if is_managed_install; then
-        existing_install_update
-    fi
+if command -v unbound >/dev/null 2>&1 || [ -e "$UNBOUND_CONF" ] || [ -d /etc/unbound ]; then
+    echo "============================================================"
+    echo " UNBOUND EXISTENTE DETECTADO"
+    echo "============================================================"
+    echo
+    echo "1 - Atualizar / reparar preservando a configuração atual"
+    echo "2 - REINSTALAR DO ZERO (limpa Unbound e configura novamente)"
+    echo "3 - Cancelar"
+    echo
+    read -p "Escolha [1]: " EXISTING_ACTION
+    EXISTING_ACTION="${EXISTING_ACTION:-1}"
 
-    echo "Foi encontrado um Unbound instalado, mas a configuração NÃO foi"
-    echo "identificada como uma instalação gerenciada pelo Unbound ISP."
-    echo
-    echo "Isso é comum em Debian 12/13 quando o pacote já existe com a"
-    echo "configuração padrão da distribuição."
-    echo
-    echo "A configuração atual será salva em backup antes de qualquer troca."
-    read -p "Deseja instalar a configuração COMPLETA do Unbound ISP agora? (s/N): " REPLACE_EXISTING
-    if [[ ! "$REPLACE_EXISTING" =~ ^[Ss]$ ]]; then
-        echo "Instalação cancelada. Nenhuma configuração foi sobrescrita."
-        exit 0
-    fi
-    backup_config
+    case "$EXISTING_ACTION" in
+        1)
+            if is_managed_install && command -v unbound-checkconf >/dev/null 2>&1 && [ -s "$UNBOUND_CONF" ]; then
+                existing_install_update
+            fi
+            echo
+            echo "[INFO] Esta instalação antiga não foi identificada como gerenciada pelo Unbound ISP."
+            echo "[INFO] Para evitar alterar uma configuração desconhecida, escolha a reinstalação do zero."
+            exit 0
+            ;;
+        2)
+            echo
+            echo "ATENÇÃO: a reinstalação do zero removerá:"
+            echo " - pacote e configuração atual do Unbound"
+            echo " - /etc/unbound"
+            echo " - /var/lib/unbound"
+            echo " - marcador/configuração antiga do Unbound ISP"
+            echo
+            echo "Um backup de /etc/unbound e /var/lib/unbound será salvo em $BACKUP_DIR."
+            read -p "Confirma APAGAR o Unbound atual e reinstalar do zero? Digite REINSTALAR: " CONFIRM_REINSTALL
+            if [ "$CONFIRM_REINSTALL" != "REINSTALAR" ]; then
+                echo "Reinstalação cancelada."
+                exit 0
+            fi
+
+            mkdir -p "$BACKUP_DIR"
+            REINSTALL_BKP="$BACKUP_DIR/reinstalacao-$(date +%Y%m%d-%H%M%S)"
+            mkdir -p "$REINSTALL_BKP"
+            [ -d /etc/unbound ] && cp -a /etc/unbound "$REINSTALL_BKP/" || true
+            [ -d /var/lib/unbound ] && cp -a /var/lib/unbound "$REINSTALL_BKP/" || true
+            echo "[OK] Backup salvo em: $REINSTALL_BKP"
+
+            systemctl stop unbound 2>/dev/null || true
+            apt-get purge -y unbound unbound-anchor 2>/dev/null || apt-get purge -y unbound || true
+            apt-get autoremove -y || true
+
+            rm -rf /etc/unbound
+            rm -rf /var/lib/unbound
+            rm -f "$MANAGED_MARKER"
+            rm -f /var/log/unbound.log
+
+            echo "[OK] Instalação antiga removida."
+            echo "[INFO] Iniciando instalação limpa do Unbound ISP..."
+            ;;
+        3)
+            echo "Instalação cancelada."
+            exit 0
+            ;;
+        *)
+            echo "Opção inválida."
+            exit 1
+            ;;
+    esac
 fi
 
 echo "Executando instalação completa..."
