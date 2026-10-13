@@ -389,10 +389,29 @@ CACHE
             else
                 rm -f "$OPT_FILE"
             fi
+            local ROLLBACK_FAILED=0 CURRENT
             for J in "${!KEYS[@]}"; do
-                unbound-control set_option "${KEYS[J]}:" "${OLD[J]}" || true
+                if ! unbound-control set_option "${KEYS[J]}:" "${OLD[J]}"; then
+                    echo "[ERRO] Rollback: falha ao restaurar ${KEYS[J]}."
+                    ROLLBACK_FAILED=1
+                fi
+                if ! CURRENT="$(unbound-control get_option "${KEYS[J]}" 2>/dev/null)"; then
+                    echo "[ERRO] Rollback: nao foi possivel verificar ${KEYS[J]}."
+                    ROLLBACK_FAILED=1
+                elif [ "$CURRENT" != "${OLD[J]}" ]; then
+                    echo "[ERRO] Rollback: ${KEYS[J]} permanece em '$CURRENT' (esperado: '${OLD[J]}')."
+                    ROLLBACK_FAILED=1
+                fi
             done
-            unbound-checkconf || true
+            if ! unbound-checkconf; then
+                echo "[ERRO] Rollback: configuracao em disco invalida."
+                ROLLBACK_FAILED=1
+            fi
+            if [ "$ROLLBACK_FAILED" -ne 0 ]; then
+                echo "[CRITICO] Rollback incompleto. Verifique as opcoes ativas e a configuracao antes de novas alteracoes."
+                return 2
+            fi
+            echo "[OK] Rollback concluido e valores ativos verificados."
             return 1
         fi
     done
