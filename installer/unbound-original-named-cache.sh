@@ -454,7 +454,8 @@ if command -v unbound >/dev/null 2>&1 || [ -e "$UNBOUND_CONF" ] || [ -d /etc/unb
     echo
     echo "1 - Atualizar / reparar preservando a configuração atual"
     echo "2 - REINSTALAR DO ZERO (limpa Unbound e configura novamente)"
-    echo "3 - Cancelar"\n    echo "4 - Otimizar cache sem reiniciar (prefetch + serve-expired)"
+    echo "3 - Cancelar"
+    echo "4 - Otimizar cache sem reiniciar (prefetch + serve-expired)"
     echo
     read -p "Escolha [1]: " EXISTING_ACTION
     EXISTING_ACTION="${EXISTING_ACTION:-1}"
