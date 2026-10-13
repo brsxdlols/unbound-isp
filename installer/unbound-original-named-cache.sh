@@ -384,12 +384,19 @@ CACHE
     for I in "${!KEYS[@]}"; do
         if ! unbound-control set_option "${KEYS[I]}:" "${VALUES[I]}"; then
             echo "[ERRO] Falha em ${KEYS[I]}. Restaurando configuracao e opcoes ativas."
-            if [ -f "$BKP/isp-cache-optimization.conf" ]; then
-                cp -a "$BKP/isp-cache-optimization.conf" "$OPT_FILE"
-            else
-                rm -f "$OPT_FILE"
-            fi
             local ROLLBACK_FAILED=0 CURRENT
+            if [ -f "$BKP/isp-cache-optimization.conf" ]; then
+                if ! cp -a "$BKP/isp-cache-optimization.conf" "$OPT_FILE" ||
+                   ! cmp -s "$BKP/isp-cache-optimization.conf" "$OPT_FILE"; then
+                    echo "[ERRO] Rollback: arquivo de configuracao nao foi restaurado."
+                    ROLLBACK_FAILED=1
+                fi
+            else
+                if ! rm -f "$OPT_FILE" || [ -e "$OPT_FILE" ]; then
+                    echo "[ERRO] Rollback: arquivo novo nao foi removido."
+                    ROLLBACK_FAILED=1
+                fi
+            fi
             for J in "${!KEYS[@]}"; do
                 if ! unbound-control set_option "${KEYS[J]}:" "${OLD[J]}"; then
                     echo "[ERRO] Rollback: falha ao restaurar ${KEYS[J]}."
