@@ -7,7 +7,7 @@ set -e
 # Compatível com Debian 12/13
 # ============================================================
 
-VERSION="2.2"
+VERSION="2.3"
 UNBOUND_CONF="/etc/unbound/unbound.conf"
 CONF_DIR="/etc/unbound/unbound.conf.d"
 DNSSEC_CONF="$CONF_DIR/root-auto-trust-anchor-file.conf"
@@ -21,7 +21,7 @@ TROUBLESHOOTING_REF="c85e77e01a52cbaea7b7a8b6f7abba255e7691b2"
 banner() {
     echo "============================================================"
     echo " UNBOUND ISP - DNS RECURSIVO SEM PAINEL v$VERSION"
-    echo " named.cache + DNSSEC + troubleshooting"
+    echo " named.cache + DNSSEC + cache + troubleshooting"
     echo "============================================================"
     echo
 }
@@ -309,6 +309,126 @@ validate_dnssec() {
     return 1
 }
 
+
+# Otimizacao isolada: nao altera sysctl, nao reinicia e nao limpa cache.
+optimize_cache() {
+    local OPT_FILE="$CONF_DIR/isp-cache-optimization.conf"
+    local BKP="$BACKUP_DIR/cache-optimization-$(date +%Y%m%d-%H%M%S)-${BASHPID}"
+    local TMP
+    local -a KEYS=(prefetch serve-expired serve-expired-ttl serve-expired-client-timeout serve-expired-reply-ttl serve-expired-ttl-reset)
+    local -a VALUES=(yes yes 3600 1800 30 no)
+    local -a OLD=()
+    local I J
+
+    command -v unbound-checkconf >/dev/null 2>&1 || { echo "[ERRO] Unbound nao instalado."; return 1; }
+    unbound-control status >/dev/null 2>&1 || { echo "[ERRO] Controle Unbound indisponivel."; return 1; }
+    unbound-checkconf || return 1
+    for I in "${!KEYS[@]}"; do
+        OLD[I]="$(unbound-control get_option "${KEYS[I]}" 2>/dev/null)" || {
+            echo "[ERRO] Nao foi possivel consultar opcao ativa: ${KEYS[I]}"
+            return 1
+        }
+    done
+    # Evita reescrever arquivo e enviar comandos ao daemon quando ja esta otimizado.
+    local ALREADY_CONFIGURED="yes"
+    for I in "${!KEYS[@]}"; do
+        if [ "${OLD[I]}" != "${VALUES[I]}" ]; then
+            ALREADY_CONFIGURED="no"
+            break
+        fi
+    done
+    if [ "$ALREADY_CONFIGURED" = "yes" ] && [ -f "$OPT_FILE" ]; then
+        local EXPECTED
+        EXPECTED="$(mktemp)"
+        cat > "$EXPECTED" <<'CACHE'
+server:
+    prefetch: yes
+    serve-expired: yes
+    serve-expired-ttl: 3600
+    serve-expired-client-timeout: 1800
+    serve-expired-reply-ttl: 30
+    serve-expired-ttl-reset: no
+CACHE
+        if cmp -s "$EXPECTED" "$OPT_FILE"; then
+            rm -f "$EXPECTED"
+            echo "[OK] Otimizacao ja configurada e ativa; nenhuma alteracao necessaria."
+            return 0
+        fi
+        rm -f "$EXPECTED"
+    fi
+    mkdir -p "$CONF_DIR" "$BKP"
+    if [ -e "$OPT_FILE" ]; then
+        cp -a "$OPT_FILE" "$BKP/isp-cache-optimization.conf"
+    fi
+    TMP="$(mktemp "$CONF_DIR/.isp-cache-optimization.XXXXXX")"
+    cat > "$TMP" <<'CACHE'
+server:
+    prefetch: yes
+    serve-expired: yes
+    serve-expired-ttl: 3600
+    serve-expired-client-timeout: 1800
+    serve-expired-reply-ttl: 30
+    serve-expired-ttl-reset: no
+CACHE
+    chmod 0644 "$TMP"
+    mv -f "$TMP" "$OPT_FILE"
+    if ! unbound-checkconf; then
+        echo "[ERRO] Configuracao invalida. Restaurando arquivo."
+        if [ -f "$BKP/isp-cache-optimization.conf" ]; then
+            cp -a "$BKP/isp-cache-optimization.conf" "$OPT_FILE"
+        else
+            rm -f "$OPT_FILE"
+        fi
+        return 1
+    fi
+    for I in "${!KEYS[@]}"; do
+        if ! unbound-control set_option "${KEYS[I]}:" "${VALUES[I]}"; then
+            echo "[ERRO] Falha em ${KEYS[I]}. Restaurando configuracao e opcoes ativas."
+            local ROLLBACK_FAILED=0 CURRENT
+            if [ -f "$BKP/isp-cache-optimization.conf" ]; then
+                if ! cp -a "$BKP/isp-cache-optimization.conf" "$OPT_FILE" ||
+                   ! cmp -s "$BKP/isp-cache-optimization.conf" "$OPT_FILE"; then
+                    echo "[ERRO] Rollback: arquivo de configuracao nao foi restaurado."
+                    ROLLBACK_FAILED=1
+                fi
+            else
+                if ! rm -f "$OPT_FILE" || [ -e "$OPT_FILE" ]; then
+                    echo "[ERRO] Rollback: arquivo novo nao foi removido."
+                    ROLLBACK_FAILED=1
+                fi
+            fi
+            for J in "${!KEYS[@]}"; do
+                if ! unbound-control set_option "${KEYS[J]}:" "${OLD[J]}"; then
+                    echo "[ERRO] Rollback: falha ao restaurar ${KEYS[J]}."
+                    ROLLBACK_FAILED=1
+                fi
+                if ! CURRENT="$(unbound-control get_option "${KEYS[J]}" 2>/dev/null)"; then
+                    echo "[ERRO] Rollback: nao foi possivel verificar ${KEYS[J]}."
+                    ROLLBACK_FAILED=1
+                elif [ "$CURRENT" != "${OLD[J]}" ]; then
+                    echo "[ERRO] Rollback: ${KEYS[J]} permanece em '$CURRENT' (esperado: '${OLD[J]}')."
+                    ROLLBACK_FAILED=1
+                fi
+            done
+            if ! unbound-checkconf; then
+                echo "[ERRO] Rollback: configuracao em disco invalida."
+                ROLLBACK_FAILED=1
+            fi
+            if [ "$ROLLBACK_FAILED" -ne 0 ]; then
+                echo "[CRITICO] Rollback incompleto. Verifique as opcoes ativas e a configuracao antes de novas alteracoes."
+                return 2
+            fi
+            echo "[OK] Rollback concluido e valores ativos verificados."
+            return 1
+        fi
+    done
+    echo "[OK] Otimizacao aplicada sem restart/reload/flush."
+    echo "[OK] Backup (se havia arquivo anterior): $BKP"
+    for I in "${!KEYS[@]}"; do
+        printf '%-34s %s\n' "${KEYS[I]}" "$(unbound-control get_option "${KEYS[I]}")"
+    done
+}
+
 existing_install_update() {
     echo "============================================================"
     echo " Unbound ISP já configurado detectado"
@@ -388,6 +508,7 @@ if command -v unbound >/dev/null 2>&1 || [ -e "$UNBOUND_CONF" ] || [ -d /etc/unb
     echo "1 - Atualizar / reparar preservando a configuração atual"
     echo "2 - REINSTALAR DO ZERO (limpa Unbound e configura novamente)"
     echo "3 - Cancelar"
+    echo "4 - Otimizar cache sem reiniciar (prefetch + serve-expired)"
     echo
     read -p "Escolha [1]: " EXISTING_ACTION
     EXISTING_ACTION="${EXISTING_ACTION:-1}"
@@ -435,6 +556,10 @@ if command -v unbound >/dev/null 2>&1 || [ -e "$UNBOUND_CONF" ] || [ -d /etc/unb
 
             echo "[OK] Instalação antiga removida."
             echo "[INFO] Iniciando instalação limpa do Unbound ISP..."
+            ;;
+        4)
+            optimize_cache
+            exit $?
             ;;
         3)
             echo "Instalação cancelada."
@@ -624,6 +749,14 @@ $IPV6_BLOCKS
     cache-max-ttl: 7200
     minimal-responses: yes
     rrset-roundrobin: yes
+
+    # Otimizacao de cache v2.3 (instalacoes novas)
+    prefetch: yes
+    serve-expired: yes
+    serve-expired-ttl: 3600
+    serve-expired-client-timeout: 1800
+    serve-expired-reply-ttl: 30
+    serve-expired-ttl-reset: no
 
     statistics-interval: 0
     extended-statistics: yes

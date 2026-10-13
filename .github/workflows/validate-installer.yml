@@ -1,0 +1,44 @@
+name: Validate Unbound ISP installer
+
+on:
+  push:
+    branches:
+      - feature/unbound-isp-v2-3-cache-optimization
+  pull_request:
+    paths:
+      - 'installer/unbound-original-named-cache.sh'
+      - '.github/workflows/validate-installer.yml'
+  workflow_dispatch:
+
+jobs:
+  static-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Bash syntax
+        run: bash -n installer/unbound-original-named-cache.sh
+      - name: Validate v2.3 cache feature structure
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          source = Path("installer/unbound-original-named-cache.sh").read_text()
+          assert 'VERSION="2.3"' in source
+          assert 'echo "4 - Otimizar cache sem reiniciar (prefetch + serve-expired)"' in source
+          assert 'echo "3 - Cancelar"\\n' not in source
+          match = re.search(r'^optimize_cache\(\) \{(.*?)^\}', source, re.M | re.S)
+          assert match, "optimize_cache function missing"
+          body = match.group(1)
+          for directive in (
+              "prefetch: yes", "serve-expired: yes",
+              "serve-expired-ttl: 3600",
+              "serve-expired-client-timeout: 1800",
+              "serve-expired-reply-ttl: 30",
+              "serve-expired-ttl-reset: no",
+          ):
+              assert directive in body, f"Missing directive: {directive}"
+          for forbidden in ("systemctl restart", "systemctl reload", "flush_zone", "flush_requestlist"):
+              assert forbidden not in body, f"Disruptive operation in cache optimization: {forbidden}"
+          assert "unbound-checkconf" in body
+          assert "unbound-control set_option" in body
+          print("Static checks passed; runtime behavior still requires isolated testing.")
