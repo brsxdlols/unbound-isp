@@ -323,6 +323,33 @@ optimize_cache() {
     command -v unbound-checkconf >/dev/null 2>&1 || { echo "[ERRO] Unbound nao instalado."; return 1; }
     unbound-control status >/dev/null 2>&1 || { echo "[ERRO] Controle Unbound indisponivel."; return 1; }
     unbound-checkconf || return 1
+    # Evita reescrever arquivo e enviar comandos ao daemon quando ja esta otimizado.
+    local ALREADY_CONFIGURED="yes"
+    for I in "${!KEYS[@]}"; do
+        if [ "${OLD[I]}" != "${VALUES[I]}" ]; then
+            ALREADY_CONFIGURED="no"
+            break
+        fi
+    done
+    if [ "$ALREADY_CONFIGURED" = "yes" ] && [ -f "$OPT_FILE" ]; then
+        local EXPECTED
+        EXPECTED="$(mktemp)"
+        cat > "$EXPECTED" <<'CACHE'
+server:
+    prefetch: yes
+    serve-expired: yes
+    serve-expired-ttl: 3600
+    serve-expired-client-timeout: 1800
+    serve-expired-reply-ttl: 30
+    serve-expired-ttl-reset: no
+CACHE
+        if cmp -s "$EXPECTED" "$OPT_FILE"; then
+            rm -f "$EXPECTED"
+            echo "[OK] Otimizacao ja configurada e ativa; nenhuma alteracao necessaria."
+            return 0
+        fi
+        rm -f "$EXPECTED"
+    fi
     mkdir -p "$CONF_DIR" "$BKP"
     if [ -e "$OPT_FILE" ]; then
         cp -a "$OPT_FILE" "$BKP/isp-cache-optimization.conf"
