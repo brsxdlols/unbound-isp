@@ -313,7 +313,7 @@ validate_dnssec() {
 # Otimizacao isolada: nao altera sysctl, nao reinicia e nao limpa cache.
 optimize_cache() {
     local OPT_FILE="$CONF_DIR/isp-cache-optimization.conf"
-    local BKP="$BACKUP_DIR/cache-optimization-$(date +%Y%m%d-%H%M%S)-$"
+    local BKP="$BACKUP_DIR/cache-optimization-$(date +%Y%m%d-%H%M%S)-${BASHPID}"
     local TMP
     local -a KEYS=(prefetch serve-expired serve-expired-ttl serve-expired-client-timeout serve-expired-reply-ttl serve-expired-ttl-reset)
     local -a VALUES=(yes yes 3600 1800 30 no)
@@ -323,6 +323,12 @@ optimize_cache() {
     command -v unbound-checkconf >/dev/null 2>&1 || { echo "[ERRO] Unbound nao instalado."; return 1; }
     unbound-control status >/dev/null 2>&1 || { echo "[ERRO] Controle Unbound indisponivel."; return 1; }
     unbound-checkconf || return 1
+    for I in "${!KEYS[@]}"; do
+        OLD[I]="$(unbound-control get_option "${KEYS[I]}" 2>/dev/null)" || {
+            echo "[ERRO] Nao foi possivel consultar opcao ativa: ${KEYS[I]}"
+            return 1
+        }
+    done
     # Evita reescrever arquivo e enviar comandos ao daemon quando ja esta otimizado.
     local ALREADY_CONFIGURED="yes"
     for I in "${!KEYS[@]}"; do
@@ -354,12 +360,6 @@ CACHE
     if [ -e "$OPT_FILE" ]; then
         cp -a "$OPT_FILE" "$BKP/isp-cache-optimization.conf"
     fi
-    for I in "${!KEYS[@]}"; do
-        OLD[I]="$(unbound-control get_option "${KEYS[I]}" 2>/dev/null)" || {
-            echo "[ERRO] Nao foi possivel consultar opcao ativa: ${KEYS[I]}"
-            return 1
-        }
-    done
     TMP="$(mktemp "$CONF_DIR/.isp-cache-optimization.XXXXXX")"
     cat > "$TMP" <<'CACHE'
 server:
