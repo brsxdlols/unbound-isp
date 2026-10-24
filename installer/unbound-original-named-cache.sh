@@ -7,7 +7,7 @@ set -e
 # Compatível com Debian 12/13
 # ============================================================
 
-VERSION="2.4.1"
+VERSION="2.4.2"
 UNBOUND_CONF="/etc/unbound/unbound.conf"
 CONF_DIR="/etc/unbound/unbound.conf.d"
 DNSSEC_CONF="$CONF_DIR/root-auto-trust-anchor-file.conf"
@@ -552,6 +552,33 @@ if command -v unbound >/dev/null 2>&1 || [ -e "$UNBOUND_CONF" ] || [ -d /etc/unb
                 echo "Reinstalação cancelada."
                 exit 0
             fi
+
+            # DNS temporario ANTES de parar/remover o resolvedor local.
+            # Nao restaura 127.0.0.1 em falhas apos a remocao do Unbound.
+            RESOLV_BKP="$BACKUP_DIR/resolv.conf-before-reinstall-$(date +%Y%m%d-%H%M%S)"
+            mkdir -p "$BACKUP_DIR"
+            cp -a /etc/resolv.conf "$RESOLV_BKP"
+            echo "[INFO] DNS temporario 8.8.8.8 durante a reinstalacao."
+            if [ -L /etc/resolv.conf ]; then
+                echo "[ERRO] /etc/resolv.conf e um link simbolico; ajuste manualmente o DNS antes de reinstalar."
+                exit 1
+            fi
+            if ! printf 'nameserver 8.8.8.8\noptions timeout:2 attempts:3\n' > /etc/resolv.conf; then
+                echo "[ERRO] Falha ao configurar DNS temporario."
+                exit 1
+            fi
+            if ! getent ahostsv4 deb.debian.org >/dev/null; then
+                echo "[ERRO] DNS temporario 8.8.8.8 nao resolve deb.debian.org; Unbound preservado."
+                cp -a "$RESOLV_BKP" /etc/resolv.conf
+                exit 1
+            fi
+            echo "[INFO] Conferindo repositorios e disponibilidade dos pacotes antes da remocao..."
+            if ! apt-get update || ! apt-get install -y --download-only --reinstall unbound dns-root-data; then
+                echo "[ERRO] Preflight APT falhou. Unbound preservado."
+                cp -a "$RESOLV_BKP" /etc/resolv.conf
+                exit 1
+            fi
+            echo "[OK] DNS externo e pacotes de reinstalacao verificados."
 
             mkdir -p "$BACKUP_DIR"
             REINSTALL_BKP="$BACKUP_DIR/reinstalacao-$(date +%Y%m%d-%H%M%S)"
