@@ -7,7 +7,7 @@ set -e
 # Compatível com Debian 12/13
 # ============================================================
 
-VERSION="2.4"
+VERSION="2.4.1"
 UNBOUND_CONF="/etc/unbound/unbound.conf"
 CONF_DIR="/etc/unbound/unbound.conf.d"
 DNSSEC_CONF="$CONF_DIR/root-auto-trust-anchor-file.conf"
@@ -56,13 +56,27 @@ fetch_to() {
 
 install_troubleshooting() {
     local URL="https://raw.githubusercontent.com/brsxdlols/unbound-isp/${TROUBLESHOOTING_REF}/troubleshooting/unbound-troubleshooting.sh"
-    echo "[INFO] Instalando troubleshooting estável..."
-    if ! fetch_to "$URL" /root/unbound-troubleshooting.sh; then
-        echo "ERRO: não foi possível baixar o troubleshooting do projeto."
+    local TMP
+    TMP="$(mktemp /root/.unbound-troubleshooting.XXXXXX)" || return 1
+    echo "[INFO] Baixando troubleshooting IPv4/IPv6..."
+    if ! fetch_to "$URL" "$TMP"; then
+        echo "[ERRO] Falha no download do troubleshooting."
+        rm -f "$TMP"
         return 1
     fi
-    chmod +x /root/unbound-troubleshooting.sh
-    echo "[OK] Troubleshooting instalado."
+    if ! bash -n "$TMP"; then
+        echo "[ERRO] Arquivo baixado com sintaxe Bash invalida."
+        rm -f "$TMP"
+        return 1
+    fi
+    if ! grep -q '1B - IPV6' "$TMP" || ! grep -q 'dig -6' "$TMP"; then
+        echo "[ERRO] Arquivo baixado nao possui os testes IPv6 esperados."
+        rm -f "$TMP"
+        return 1
+    fi
+    chmod 755 "$TMP"
+    mv -f "$TMP" /root/unbound-troubleshooting.sh
+    echo "[OK] Troubleshooting IPv4/IPv6 instalado e validado."
 }
 
 ensure_module() {
