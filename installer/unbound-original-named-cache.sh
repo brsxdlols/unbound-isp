@@ -509,6 +509,7 @@ if command -v unbound >/dev/null 2>&1 || [ -e "$UNBOUND_CONF" ] || [ -d /etc/unb
     echo "2 - REINSTALAR DO ZERO (limpa Unbound e configura novamente)"
     echo "3 - Cancelar"
     echo "4 - Otimizar cache sem reiniciar (prefetch + serve-expired)"
+    echo "5 - Atualizar somente troubleshooting (sem reiniciar Unbound)"
     echo
     read -p "Escolha [1]: " EXISTING_ACTION
     EXISTING_ACTION="${EXISTING_ACTION:-1}"
@@ -561,6 +562,11 @@ if command -v unbound >/dev/null 2>&1 || [ -e "$UNBOUND_CONF" ] || [ -d /etc/unb
             optimize_cache
             exit $?
             ;;
+        5)
+            install_troubleshooting
+            echo "[OK] Troubleshooting atualizado sem reiniciar Unbound."
+            exit 0
+            ;;
         3)
             echo "Instalação cancelada."
             exit 0
@@ -578,7 +584,7 @@ echo
 apply_kernel_tuning
 
 apt-get update
-apt-get install -y unbound dnstop dnsutils curl ca-certificates
+apt-get install -y unbound dnstop dnsutils curl ca-certificates python3
 
 install_troubleshooting
 
