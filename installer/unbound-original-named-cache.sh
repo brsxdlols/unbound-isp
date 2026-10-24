@@ -7,7 +7,7 @@ set -e
 # Compatível com Debian 12/13
 # ============================================================
 
-VERSION="2.4.2"
+VERSION="2.4.3"
 UNBOUND_CONF="/etc/unbound/unbound.conf"
 CONF_DIR="/etc/unbound/unbound.conf.d"
 DNSSEC_CONF="$CONF_DIR/root-auto-trust-anchor-file.conf"
@@ -573,7 +573,8 @@ if command -v unbound >/dev/null 2>&1 || [ -e "$UNBOUND_CONF" ] || [ -d /etc/unb
                 exit 1
             fi
             echo "[INFO] Conferindo repositorios e disponibilidade dos pacotes antes da remocao..."
-            if ! apt-get update || ! apt-get install -y --download-only --reinstall unbound dns-root-data; then
+            if ! apt-get update -o APT::Update::Error-Mode=any ||
+               ! apt-get install -y --download-only --reinstall unbound dns-root-data dnstop bind9-dnsutils curl ca-certificates python3; then
                 echo "[ERRO] Preflight APT falhou. Unbound preservado."
                 cp -a "$RESOLV_BKP" /etc/resolv.conf
                 exit 1
@@ -589,7 +590,9 @@ if command -v unbound >/dev/null 2>&1 || [ -e "$UNBOUND_CONF" ] || [ -d /etc/unb
 
             systemctl stop unbound 2>/dev/null || true
             apt-get purge -y unbound unbound-anchor 2>/dev/null || apt-get purge -y unbound || true
-            apt-get autoremove -y || true
+            # Nao executar autoremove aqui: dependencias ainda serao usadas
+            # e podem exigir novo download se removidas.
+            echo "[INFO] Dependencias preservadas (sem apt autoremove)."
 
             rm -rf /etc/unbound
             rm -rf /var/lib/unbound
