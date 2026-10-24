@@ -65,6 +65,69 @@ if systemctl is-active --quiet unbound; then ok "Unbound está ATIVO."; else err
 if ss -lunp 2>/dev/null | grep ':53 ' | grep -qi unbound; then ok "Unbound está escutando UDP/53."; else err "Unbound não encontrado em UDP/53."; fi
 if ss -ltnp 2>/dev/null | grep ':53 ' | grep -qi unbound; then ok "Unbound está escutando TCP/53."; else err "Unbound não encontrado em TCP/53."; fi
 
+section "1B - IPV6 / DNS UDP E TCP"
+IPV6_ENABLED="$(unbound-control get_option do-ip6 2>/dev/null | head -1 || true)"
+echo "IPv6 configurado no Unbound: ${IPV6_ENABLED:-N/D}"
+if [ "$IPV6_ENABLED" = "no" ]; then
+    info "IPv6 desabilitado: testes IPv6 ignorados, sem penalizacao."
+elif [ "$IPV6_ENABLED" != "yes" ]; then
+    warn "Nao foi possivel determinar se IPv6 esta habilitado."
+else
+    IPV6_ADDR="$(ip -6 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}')"
+    IPV6_ROUTE="$(ip -6 route show default 2>/dev/null | head -1)"
+    if [ -n "$IPV6_ADDR" ]; then ok "Endereco IPv6 global encontrado: $IPV6_ADDR"; else warn "Nenhum endereco IPv6 global configurado."; fi
+    if [ -n "$IPV6_ROUTE" ]; then ok "Rota IPv6 padrao encontrada."; else warn "Sem rota IPv6 padrao; recursao externa IPv6 pode falhar."; fi
+    if ss -lnu 2>/dev/null | grep -Eq '\[::\]:53|\[::1\]:53|\[::\]:domain'; then
+        ok "Socket DNS IPv6 UDP/53 presente."
+    else
+        err "Socket DNS IPv6 UDP/53 ausente."
+    fi
+    if ss -lnt 2>/dev/null | grep -Eq '\[::\]:53|\[::1\]:53|\[::\]:domain'; then
+        ok "Socket DNS IPv6 TCP/53 presente."
+    else
+        err "Socket DNS IPv6 TCP/53 ausente."
+    fi
+    IPV6_UDP="$(dig -6 @::1 google.com AAAA +time=3 +tries=1 2>&1 || true)"
+    if echo "$IPV6_UDP" | grep -q 'status: NOERROR' && echo "$IPV6_UDP" | grep -Eq '[[:space:]]AAAA[[:space:]]+[0-9a-fA-F:]+'; then
+        ok "Consulta AAAA via ::1/UDP respondeu NOERROR."
+    else
+        err "Consulta AAAA via ::1/UDP falhou."
+    fi
+    IPV6_TCP="$(dig -6 +tcp @::1 cloudflare.com A +dnssec +time=3 +tries=1 2>&1 || true)"
+    if echo "$IPV6_TCP" | grep -q 'status: NOERROR' && echo "$IPV6_TCP" | grep -Eq 'flags:.*[[:space:]]ad([[:space:];]|$)'; then
+        ok "Consulta A via ::1/TCP respondeu NOERROR + AD (DNSSEC)."
+    else
+        err "Consulta A via ::1/TCP falhou ou nao validou DNSSEC."
+    fi
+    IPV6_BAD="$(dig -6 @::1 dnssec-failed.org A +time=4 +tries=1 2>&1 || true)"
+    if echo "$IPV6_BAD" | grep -q 'status: SERVFAIL'; then
+        ok "DNSSEC invalido via IPv6 retornou SERVFAIL."
+    else
+        warn "Teste de DNSSEC invalido via IPv6 inconclusivo."
+    fi
+    if [ -n "$IPV6_ADDR" ]; then
+        IPV6_PUBLIC_UDP="$(dig -6 @"$IPV6_ADDR" google.com AAAA +time=3 +tries=1 2>&1 || true)"
+        if echo "$IPV6_PUBLIC_UDP" | grep -q 'status: NOERROR'; then
+            ok "Consulta UDP ao IPv6 global do proprio servidor respondeu."
+        else
+            warn "Consulta UDP ao IPv6 global do proprio servidor falhou."
+        fi
+        IPV6_PUBLIC_TCP="$(dig -6 +tcp @"$IPV6_ADDR" cloudflare.com A +time=3 +tries=1 2>&1 || true)"
+        if echo "$IPV6_PUBLIC_TCP" | grep -q 'status: NOERROR'; then
+            ok "Consulta TCP ao IPv6 global do proprio servidor respondeu."
+        else
+            warn "Consulta TCP ao IPv6 global do proprio servidor falhou."
+        fi
+    fi
+    IPV6_EXTERNAL="$(dig -6 @2606:4700:4700::1111 example.com AAAA +time=3 +tries=1 2>&1 || true)"
+    if echo "$IPV6_EXTERNAL" | grep -q 'status: NOERROR'; then
+        ok "Conectividade DNS de saida por IPv6 confirmada."
+    else
+        warn "Consulta ao DNS externo por IPv6 falhou; pode haver bloqueio de saida."
+    fi
+    info "Testes feitos neste servidor NAO comprovam acesso IPv6 de clientes externos."
+fi
+
 section "2 - RESOLUÇÃO LOCAL"
 for d in google.com cloudflare.com registro.br microsoft.com; do
     if ms1="$(dig_ms "$DNS" "$d" A)"; then
