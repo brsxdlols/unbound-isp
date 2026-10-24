@@ -7,7 +7,7 @@ set -e
 # Compatível com Debian 12/13
 # ============================================================
 
-VERSION="2.3"
+VERSION="2.4"
 UNBOUND_CONF="/etc/unbound/unbound.conf"
 CONF_DIR="/etc/unbound/unbound.conf.d"
 DNSSEC_CONF="$CONF_DIR/root-auto-trust-anchor-file.conf"
@@ -16,7 +16,7 @@ ROOT_HINTS="/var/lib/unbound/root.hints"
 ROOT_HINTS_URL="https://www.internic.net/domain/named.cache"
 BACKUP_DIR="/root/unbound-backups"
 MANAGED_MARKER="/etc/unbound/.unbound-isp-managed"
-TROUBLESHOOTING_REF="c85e77e01a52cbaea7b7a8b6f7abba255e7691b2"
+TROUBLESHOOTING_REF="99f1ad710e10cda1ac28a60b46336b9cc2afa570"
 
 banner() {
     echo "============================================================"
@@ -604,12 +604,505 @@ if [[ "$USE_IPV6" =~ ^[Ss]$ ]]; then
     while true; do
         IPV6_BLOCKS=""
         echo
-        echo "Digite os blocos IPv6 permitidos (ENTER vazio para finalizar):"
+        echo "=== Redes IPv6 permitidas ==="
+        echo "1 - Informar redes/blocos IPv6 manualmente"
+        echo "2 - Liberar consultas IPv6 para QUALQUER origem (::/0)"
+        read -p "Escolha [1]: " IPV6_MODE
+        IPV6_MODE="${IPV6_MODE:-1}"
+        case "$IPV6_MODE" in
+            1)
+                echo "Digite os blocos IPv6 permitidos (ENTER vazio para finalizar):"
+                while true; do
+                    read -p "Bloco IPv6 (ex: 2804:abcd::/32): " IP6
+                    [[ -z "$IP6" ]] && break
+                    if ! python3 - "$IP6" <<'PYIP6'
+import ipaddress, sys
+try:
+    net = ipaddress.ip_network(sys.argv[1], strict=False)
+    assert net.version == 6
+except (ValueError, AssertionError):
+    sys.exit(1)
+PYIP6
+                    then
+                        echo "[AVISO] Prefixo IPv6 invalido; tente novamente."
+                        continue
+                    fi
+                    IPV6_BLOCKS+="    access-control: $IP6 allow"
+else
+    DO_IPV6="no"
+    IPV6_INTERFACE=""
+    IPV6_BLOCKS=""
+fi
+
+while true; do
+    ALLOW_IPS=""
+    echo
+    echo "=== Redes IPv4 permitidas ==="
+    echo
+    echo "1 - Informar redes/blocos manualmente"
+    echo "2 - Liberar consultas IPv4 para QUALQUER origem (0.0.0.0/0)"
+    echo
+    read -p "Escolha [1]: " IPV4_MODE
+    IPV4_MODE="${IPV4_MODE:-1}"
+
+    if [ "$IPV4_MODE" = "2" ]; then
+        echo
+        echo "ATENÇÃO:"
+        echo "0.0.0.0/0 transforma este DNS em resolvedor aberto para qualquer IPv4."
+        echo "Isso pode permitir uso indevido/abuso se a porta 53 estiver acessível pela Internet."
+        echo
+        read -p "Confirma liberar 0.0.0.0/0? (s/n): " OPEN_CONFIRM
+        if [[ "$OPEN_CONFIRM" =~ ^[Ss]$ ]]; then
+            ALLOW_IPS='    access-control: 0.0.0.0/0 allow'$'\n'
+        else
+            echo "Liberação total cancelada. Voltando para inclusão manual."
+            IPV4_MODE="1"
+        fi
+    fi
+
+    if [ "$IPV4_MODE" = "1" ]; then
+        echo
+        echo "Digite os blocos IPv4 permitidos (ENTER vazio para finalizar):"
         while true; do
-            read -p "Bloco IPv6 (ex: 2804:abcd::/32): " IP6
-            [[ -z "$IP6" ]] && break
-            IPV6_BLOCKS+="    access-control: $IP6 allow"$'\n'
+            read -p "Bloco IPv4 (ex: 170.231.96.0/22): " IP
+            [[ -z "$IP" ]] && break
+            ALLOW_IPS+="    access-control: $IP allow"$'\n'
         done
+    fi
+
+    echo
+    echo "=============================================="
+    echo " Redes IPv4 informadas"
+    echo "=============================================="
+    if [ -n "$ALLOW_IPS" ]; then
+        printf "%s" "$ALLOW_IPS" | sed 's/^[[:space:]]*access-control:[[:space:]]*/ - /; s/[[:space:]]allow$//'
+    else
+        echo " - Nenhuma rede adicional informada"
+    fi
+    echo "=============================================="
+    read -p "As redes IPv4 acima estão corretas? (s/n): " IPV4_OK
+    if [[ "$IPV4_OK" =~ ^[Ss]$ ]]; then break; fi
+    echo "OK. Vamos informar as redes IPv4 novamente."
+done
+
+MSG_CACHE=$((RAM_GB * 512))
+RRSET_CACHE=$((RAM_GB * 256))
+if (( CPU <= 2 )); then
+    SLABS=2
+elif (( CPU <= 4 )); then
+    SLABS=4
+elif (( CPU <= 8 )); then
+    SLABS=8
+else
+    SLABS=16
+fi
+
+ROOT_HINTS_CHANGED="no"
+download_root_hints
+
+backup_config
+
+echo
+echo "Gerando configuração do Unbound..."
+cat > "$UNBOUND_CONF" <<EOF
+# ==========================================
+# UNBOUND ISP - GERENCIADO
+# Unbound - Gerado automaticamente
+# Versao do instalador: $VERSION
+# ==========================================
+
+server:
+    root-hints: "/var/lib/unbound/root.hints"
+
+    logfile: "/var/log/unbound.log"
+    use-syslog: yes
+    verbosity: 1
+
+    interface: 0.0.0.0
+    interface: 127.0.0.1
+$IPV6_INTERFACE
+    interface-automatic: yes
+
+    access-control: 127.0.0.0/8 allow
+$ALLOW_IPS
+$IPV6_BLOCKS
+    access-control: 10.0.0.0/8 allow
+    access-control: 172.16.0.0/12 allow
+    access-control: 192.168.0.0/16 allow
+    access-control: 100.64.0.0/10 allow
+    access-control: 198.18.0.0/15 allow
+
+    do-ip4: yes
+    do-ip6: $DO_IPV6
+    do-udp: yes
+    do-tcp: yes
+
+    num-threads: $CPU
+    outgoing-range: 4096
+    so-rcvbuf: 4m
+    so-sndbuf: 4m
+
+    msg-cache-size: ${MSG_CACHE}m
+    msg-cache-slabs: $SLABS
+    rrset-cache-size: ${RRSET_CACHE}m
+    rrset-cache-slabs: $SLABS
+    infra-cache-slabs: $SLABS
+    key-cache-slabs: $SLABS
+
+    num-queries-per-thread: 4096
+    cache-max-ttl: 7200
+    minimal-responses: yes
+    rrset-roundrobin: yes
+
+    # Otimizacao de cache v2.3 (instalacoes novas)
+    prefetch: yes
+    serve-expired: yes
+    serve-expired-ttl: 3600
+    serve-expired-client-timeout: 1800
+    serve-expired-reply-ttl: 30
+    serve-expired-ttl-reset: no
+
+    statistics-interval: 0
+    extended-statistics: yes
+    statistics-cumulative: no
+
+remote-control:
+    control-enable: yes
+    control-interface: 127.0.0.1
+    control-port: 8953
+    control-use-cert: "no"
+
+auth-zone:
+    name: "."
+    master: "b.root-servers.net"
+    master: "c.root-servers.net"
+    master: "d.root-servers.net"
+    master: "f.root-servers.net"
+    master: "g.root-servers.net"
+    master: "k.root-servers.net"
+    master: "lax.xfr.dns.icann.org"
+    master: "iad.xfr.dns.icann.org"
+    fallback-enabled: yes
+    for-downstream: no
+    for-upstream: yes
+    zonefile: "/var/lib/unbound/root.zone"
+
+# Configuracoes adicionais Debian / Unbound ISP
+include: "/etc/unbound/unbound.conf.d/*.conf"
+EOF
+
+chown unbound:unbound "$UNBOUND_CONF" "$ROOT_HINTS"
+
+DNSSEC_CONFIG_CHANGED="no"
+INCLUDE_CONFIG_CHANGED="no"
+ensure_dnssec_root_key || { restore_backup_if_possible; exit 1; }
+
+# Obrigatório também em instalação nova: o trust anchor do Debian fica
+# em /etc/unbound/unbound.conf.d e precisa estar incluído na config ativa.
+ensure_conf_d_include || { restore_backup_if_possible; exit 1; }
+
+validate_and_restart || exit 1
+
+if ! validate_dnssec; then
+    echo
+    echo "============================================================"
+    echo " INSTALAÇÃO NÃO CONCLUÍDA"
+    echo " DNSSEC não passou na validação obrigatória."
+    echo " A configuração anterior será restaurada quando houver backup."
+    echo "============================================================"
+    restore_backup_if_possible
+    exit 1
+fi
+
+echo
+echo "Configurando /etc/resolv.conf para DNS local..."
+cat > /etc/resolv.conf <<'EOF'
+nameserver 127.0.0.1
+options timeout:1 attempts:3
+EOF
+
+touch "$MANAGED_MARKER"
+printf 'version=%s\ninstalled=%s\n' "$VERSION" "$(date -Iseconds)" > "$MANAGED_MARKER"
+
+echo
+echo "=== Testes DNS (cache) ==="
+echo "Primeira consulta:"
+dig google.com @127.0.0.1 +time=5 +tries=1 | grep "Query time" || true
+echo "Segunda consulta:"
+dig google.com @127.0.0.1 +time=5 +tries=1 | grep "Query time" || true
+
+echo
+echo "=== named.cache / root hints ==="
+echo "Arquivo : $ROOT_HINTS"
+echo "Linhas  : $(wc -l < "$ROOT_HINTS")"
+echo "Tamanho : $(wc -c < "$ROOT_HINTS") bytes"
+
+echo
+echo "=============================================="
+echo " INSTALAÇÃO CONCLUÍDA COM SUCESSO"
+echo " Unbound: ATIVO"
+echo " DNSSEC : VALIDADO (NOERROR+AD / SERVFAIL)"
+echo " IPv6   : $DO_IPV6"
+echo " CPU    : $CPU"
+echo " RAM    : ${RAM_GB}GB"
+echo " named.cache: ATIVO"
+echo " Painel : NÃO INSTALADO"
+echo "=============================================="
+
+echo
+read -p "Deseja executar o troubleshooting completo agora? (S/n): " RUN_TS
+RUN_TS="${RUN_TS:-S}"
+if [[ "$RUN_TS" =~ ^[Ss]$ ]]; then
+    /root/unbound-troubleshooting.sh
+fi
+\n'
+                done
+                ;;
+            2)
+                echo
+                echo "ATENCAO: ::/0 autoriza consultas DNS de qualquer IPv6."
+                echo "Garanta bloqueio de UDP/TCP 53 no MikroTik ou firewall externo."
+                read -p "Confirma liberar ::/0? (s/n): " IPV6_OPEN_CONFIRM
+                if [[ "$IPV6_OPEN_CONFIRM" =~ ^[Ss]$ ]]; then
+                    IPV6_BLOCKS='    access-control: ::/0 allow'
+else
+    DO_IPV6="no"
+    IPV6_INTERFACE=""
+    IPV6_BLOCKS=""
+fi
+
+while true; do
+    ALLOW_IPS=""
+    echo
+    echo "=== Redes IPv4 permitidas ==="
+    echo
+    echo "1 - Informar redes/blocos manualmente"
+    echo "2 - Liberar consultas IPv4 para QUALQUER origem (0.0.0.0/0)"
+    echo
+    read -p "Escolha [1]: " IPV4_MODE
+    IPV4_MODE="${IPV4_MODE:-1}"
+
+    if [ "$IPV4_MODE" = "2" ]; then
+        echo
+        echo "ATENÇÃO:"
+        echo "0.0.0.0/0 transforma este DNS em resolvedor aberto para qualquer IPv4."
+        echo "Isso pode permitir uso indevido/abuso se a porta 53 estiver acessível pela Internet."
+        echo
+        read -p "Confirma liberar 0.0.0.0/0? (s/n): " OPEN_CONFIRM
+        if [[ "$OPEN_CONFIRM" =~ ^[Ss]$ ]]; then
+            ALLOW_IPS='    access-control: 0.0.0.0/0 allow'$'\n'
+        else
+            echo "Liberação total cancelada. Voltando para inclusão manual."
+            IPV4_MODE="1"
+        fi
+    fi
+
+    if [ "$IPV4_MODE" = "1" ]; then
+        echo
+        echo "Digite os blocos IPv4 permitidos (ENTER vazio para finalizar):"
+        while true; do
+            read -p "Bloco IPv4 (ex: 170.231.96.0/22): " IP
+            [[ -z "$IP" ]] && break
+            ALLOW_IPS+="    access-control: $IP allow"$'\n'
+        done
+    fi
+
+    echo
+    echo "=============================================="
+    echo " Redes IPv4 informadas"
+    echo "=============================================="
+    if [ -n "$ALLOW_IPS" ]; then
+        printf "%s" "$ALLOW_IPS" | sed 's/^[[:space:]]*access-control:[[:space:]]*/ - /; s/[[:space:]]allow$//'
+    else
+        echo " - Nenhuma rede adicional informada"
+    fi
+    echo "=============================================="
+    read -p "As redes IPv4 acima estão corretas? (s/n): " IPV4_OK
+    if [[ "$IPV4_OK" =~ ^[Ss]$ ]]; then break; fi
+    echo "OK. Vamos informar as redes IPv4 novamente."
+done
+
+MSG_CACHE=$((RAM_GB * 512))
+RRSET_CACHE=$((RAM_GB * 256))
+if (( CPU <= 2 )); then
+    SLABS=2
+elif (( CPU <= 4 )); then
+    SLABS=4
+elif (( CPU <= 8 )); then
+    SLABS=8
+else
+    SLABS=16
+fi
+
+ROOT_HINTS_CHANGED="no"
+download_root_hints
+
+backup_config
+
+echo
+echo "Gerando configuração do Unbound..."
+cat > "$UNBOUND_CONF" <<EOF
+# ==========================================
+# UNBOUND ISP - GERENCIADO
+# Unbound - Gerado automaticamente
+# Versao do instalador: $VERSION
+# ==========================================
+
+server:
+    root-hints: "/var/lib/unbound/root.hints"
+
+    logfile: "/var/log/unbound.log"
+    use-syslog: yes
+    verbosity: 1
+
+    interface: 0.0.0.0
+    interface: 127.0.0.1
+$IPV6_INTERFACE
+    interface-automatic: yes
+
+    access-control: 127.0.0.0/8 allow
+$ALLOW_IPS
+$IPV6_BLOCKS
+    access-control: 10.0.0.0/8 allow
+    access-control: 172.16.0.0/12 allow
+    access-control: 192.168.0.0/16 allow
+    access-control: 100.64.0.0/10 allow
+    access-control: 198.18.0.0/15 allow
+
+    do-ip4: yes
+    do-ip6: $DO_IPV6
+    do-udp: yes
+    do-tcp: yes
+
+    num-threads: $CPU
+    outgoing-range: 4096
+    so-rcvbuf: 4m
+    so-sndbuf: 4m
+
+    msg-cache-size: ${MSG_CACHE}m
+    msg-cache-slabs: $SLABS
+    rrset-cache-size: ${RRSET_CACHE}m
+    rrset-cache-slabs: $SLABS
+    infra-cache-slabs: $SLABS
+    key-cache-slabs: $SLABS
+
+    num-queries-per-thread: 4096
+    cache-max-ttl: 7200
+    minimal-responses: yes
+    rrset-roundrobin: yes
+
+    # Otimizacao de cache v2.3 (instalacoes novas)
+    prefetch: yes
+    serve-expired: yes
+    serve-expired-ttl: 3600
+    serve-expired-client-timeout: 1800
+    serve-expired-reply-ttl: 30
+    serve-expired-ttl-reset: no
+
+    statistics-interval: 0
+    extended-statistics: yes
+    statistics-cumulative: no
+
+remote-control:
+    control-enable: yes
+    control-interface: 127.0.0.1
+    control-port: 8953
+    control-use-cert: "no"
+
+auth-zone:
+    name: "."
+    master: "b.root-servers.net"
+    master: "c.root-servers.net"
+    master: "d.root-servers.net"
+    master: "f.root-servers.net"
+    master: "g.root-servers.net"
+    master: "k.root-servers.net"
+    master: "lax.xfr.dns.icann.org"
+    master: "iad.xfr.dns.icann.org"
+    fallback-enabled: yes
+    for-downstream: no
+    for-upstream: yes
+    zonefile: "/var/lib/unbound/root.zone"
+
+# Configuracoes adicionais Debian / Unbound ISP
+include: "/etc/unbound/unbound.conf.d/*.conf"
+EOF
+
+chown unbound:unbound "$UNBOUND_CONF" "$ROOT_HINTS"
+
+DNSSEC_CONFIG_CHANGED="no"
+INCLUDE_CONFIG_CHANGED="no"
+ensure_dnssec_root_key || { restore_backup_if_possible; exit 1; }
+
+# Obrigatório também em instalação nova: o trust anchor do Debian fica
+# em /etc/unbound/unbound.conf.d e precisa estar incluído na config ativa.
+ensure_conf_d_include || { restore_backup_if_possible; exit 1; }
+
+validate_and_restart || exit 1
+
+if ! validate_dnssec; then
+    echo
+    echo "============================================================"
+    echo " INSTALAÇÃO NÃO CONCLUÍDA"
+    echo " DNSSEC não passou na validação obrigatória."
+    echo " A configuração anterior será restaurada quando houver backup."
+    echo "============================================================"
+    restore_backup_if_possible
+    exit 1
+fi
+
+echo
+echo "Configurando /etc/resolv.conf para DNS local..."
+cat > /etc/resolv.conf <<'EOF'
+nameserver 127.0.0.1
+options timeout:1 attempts:3
+EOF
+
+touch "$MANAGED_MARKER"
+printf 'version=%s\ninstalled=%s\n' "$VERSION" "$(date -Iseconds)" > "$MANAGED_MARKER"
+
+echo
+echo "=== Testes DNS (cache) ==="
+echo "Primeira consulta:"
+dig google.com @127.0.0.1 +time=5 +tries=1 | grep "Query time" || true
+echo "Segunda consulta:"
+dig google.com @127.0.0.1 +time=5 +tries=1 | grep "Query time" || true
+
+echo
+echo "=== named.cache / root hints ==="
+echo "Arquivo : $ROOT_HINTS"
+echo "Linhas  : $(wc -l < "$ROOT_HINTS")"
+echo "Tamanho : $(wc -c < "$ROOT_HINTS") bytes"
+
+echo
+echo "=============================================="
+echo " INSTALAÇÃO CONCLUÍDA COM SUCESSO"
+echo " Unbound: ATIVO"
+echo " DNSSEC : VALIDADO (NOERROR+AD / SERVFAIL)"
+echo " IPv6   : $DO_IPV6"
+echo " CPU    : $CPU"
+echo " RAM    : ${RAM_GB}GB"
+echo " named.cache: ATIVO"
+echo " Painel : NÃO INSTALADO"
+echo "=============================================="
+
+echo
+read -p "Deseja executar o troubleshooting completo agora? (S/n): " RUN_TS
+RUN_TS="${RUN_TS:-S}"
+if [[ "$RUN_TS" =~ ^[Ss]$ ]]; then
+    /root/unbound-troubleshooting.sh
+fi
+\n'
+                else
+                    echo "Liberacao total cancelada."
+                    continue
+                fi
+                ;;
+            *)
+                echo "Opcao invalida."
+                continue
+                ;;
+        esac
         echo
         echo "=============================================="
         echo " Redes IPv6 informadas"
@@ -617,7 +1110,7 @@ if [[ "$USE_IPV6" =~ ^[Ss]$ ]]; then
         if [ -n "$IPV6_BLOCKS" ]; then
             printf "%s" "$IPV6_BLOCKS" | sed 's/^[[:space:]]*access-control:[[:space:]]*/ - /; s/[[:space:]]allow$//'
         else
-            echo " - Nenhuma rede IPv6 adicional informada"
+            echo " - Nenhuma rede IPv6 adicional informada (somente loopback)"
         fi
         echo "=============================================="
         read -p "As redes IPv6 acima estão corretas? (s/n): " IPV6_OK
