@@ -633,7 +633,39 @@ PYIP6
                         echo "[AVISO] Prefixo IPv6 invalido; tente novamente."
                         continue
                     fi
-                    IPV6_BLOCKS+="    access-control: $IP6 allow"
+                    IPV6_BLOCKS+="    access-control: $IP6 allow"$'\n'
+                done
+                ;;
+            2)
+                echo
+                echo "ATENCAO: ::/0 autoriza consultas DNS de qualquer IPv6."
+                echo "Garanta bloqueio de UDP/TCP 53 no MikroTik ou firewall externo."
+                read -p "Confirma liberar ::/0? (s/n): " IPV6_OPEN_CONFIRM
+                if [[ "$IPV6_OPEN_CONFIRM" =~ ^[Ss]$ ]]; then
+                    IPV6_BLOCKS='    access-control: ::/0 allow'$'\n'
+                else
+                    echo "Liberacao total cancelada."
+                    continue
+                fi
+                ;;
+            *)
+                echo "Opcao invalida."
+                continue
+                ;;
+        esac
+        echo
+        echo "=============================================="
+        echo " Redes IPv6 informadas"
+        echo "=============================================="
+        if [ -n "$IPV6_BLOCKS" ]; then
+            printf "%s" "$IPV6_BLOCKS" | sed 's/^[[:space:]]*access-control:[[:space:]]*/ - /; s/[[:space:]]allow$//'
+        else
+            echo " - Nenhuma rede IPv6 adicional informada (somente loopback)"
+        fi
+        echo "=============================================="
+        read -p "As redes IPv6 acima estao corretas? (s/n): " IPV6_OK
+        if [[ "$IPV6_OK" =~ ^[Ss]$ ]]; then break; fi
+    done
 else
     DO_IPV6="no"
     IPV6_INTERFACE=""
