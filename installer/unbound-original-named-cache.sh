@@ -7,7 +7,7 @@ set -e
 # Compatível com Debian 12/13
 # ============================================================
 
-VERSION="2.4.3"
+VERSION="2.4.4"
 UNBOUND_CONF="/etc/unbound/unbound.conf"
 CONF_DIR="/etc/unbound/unbound.conf.d"
 DNSSEC_CONF="$CONF_DIR/root-auto-trust-anchor-file.conf"
@@ -794,6 +794,9 @@ cat > "$UNBOUND_CONF" <<EOF
 # ==========================================
 
 server:
+    # Evita avisos do subnetcache com prefetch e serve-expired.
+    # ECS nao e utilizado no perfil padrao do instalador.
+    module-config: "validator iterator"
     root-hints: "/var/lib/unbound/root.hints"
 
     logfile: "/var/log/unbound.log"
