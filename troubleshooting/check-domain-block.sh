@@ -9,6 +9,7 @@ if [[ -z "$DOMAIN" ]]; then
   fi
   read -r -p "Qual dominio deseja consultar? " DOMAIN
 fi
+check_domain() {
 if [[ ! "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ || "$DOMAIN" != *.* || ${#DOMAIN} -gt 253 || "$DOMAIN" == *..* ]]; then
   echo "Uso: bash <(curl -fsSL URL) dominio.com"; exit 2
 fi
@@ -99,3 +100,16 @@ else
 fi
 echo "============================================================"
 echo "OBS: verifica DNS local; nao identifica bloqueio por firewall, IP ou HTTP."
+
+}
+
+while true; do
+  check_domain
+  if [[ ! -t 0 ]]; then break; fi
+  echo
+  read -r -p "Deseja consultar outro dominio? [s/N]: " AGAIN || break
+  case "${AGAIN,,}" in
+    s|sim) read -r -p "Qual dominio deseja consultar? " DOMAIN || break ;;
+    *) echo "Consulta encerrada."; break ;;
+  esac
+done
