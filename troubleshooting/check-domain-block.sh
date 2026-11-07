@@ -80,15 +80,13 @@ if [[ -s "$RULES" ]]; then
 elif ((local_fail && external_ok)); then
   echo -e "${YELLOW}SUSPEITA DE BLOQUEIO OU FALHA LOCAL${RESET}"
   echo "O DNS local falhou e pelo menos um DNS externo respondeu."
-elif ((local_ok && different)); then
-  echo -e "${YELLOW}POSSIVEL REDIRECIONAMENTO DNS - VERIFICAR ANABLOCK${RESET}"
-  echo "O DNS local devolveu IP diferente dos externos."
-  echo "Nao foi encontrada regra correspondente em $ANAFILE."
-  echo "Isso tambem pode acontecer normalmente por CDN/geolocalizacao."
 elif ((local_ok)); then
   echo -e "${GREEN}████████████████████████████████████████████████████████"
   echo "  NAO BLOQUEADO PELO DNS LOCAL (SEM INDICIOS)"
   echo -e "████████████████████████████████████████████████████████${RESET}"
+  if ((different)); then
+    echo "INFO: IPs diferentes dos DNS publicos podem ser normais por CDN/geolocalizacao."
+  fi
 else
   echo -e "${YELLOW}INCONCLUSIVO - VERIFICAR DNS E CONECTIVIDADE${RESET}"
 fi
