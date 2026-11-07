@@ -2,6 +2,13 @@
 # Unbound ISP - Verificador de bloqueio DNS / ANABLOCK v2
 set -uo pipefail
 DOMAIN="${1:-}"
+if [[ -z "$DOMAIN" ]]; then
+  if [[ ! -t 0 ]]; then
+    echo "ERRO: informe um dominio como argumento (modo nao interativo)."
+    exit 2
+  fi
+  read -r -p "Qual dominio deseja consultar? " DOMAIN
+fi
 if [[ ! "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ || "$DOMAIN" != *.* || ${#DOMAIN} -gt 253 || "$DOMAIN" == *..* ]]; then
   echo "Uso: bash <(curl -fsSL URL) dominio.com"; exit 2
 fi
