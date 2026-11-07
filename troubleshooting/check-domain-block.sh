@@ -1,56 +1,96 @@
 #!/usr/bin/env bash
-# Unbound ISP - Verificador direcionado de bloqueio DNS
+# Unbound ISP - Verificador de bloqueio DNS / ANABLOCK v2
 set -uo pipefail
 DOMAIN="${1:-}"
-if [[ ! "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ || "$DOMAIN" != *.* || ${#DOMAIN} -gt 253 ]]; then
+if [[ ! "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ || "$DOMAIN" != *.* || ${#DOMAIN} -gt 253 || "$DOMAIN" == *..* ]]; then
   echo "Uso: bash <(curl -fsSL URL) dominio.com"; exit 2
 fi
 DOMAIN="${DOMAIN,,}"
-for cmd in dig timeout; do command -v "$cmd" >/dev/null || { echo "ERRO: falta $cmd"; exit 2; }; done
-echo "=================================================="
-echo " VERIFICADOR DE BLOQUEIO DNS - $DOMAIN"
-echo "=================================================="
-tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-check() {
-  local label="$1" server="$2" type="$3" file="$4"
-  timeout 8 dig @"$server" "$DOMAIN" "$type" +time=3 +tries=1 +noall +comments +answer > "$file" 2>&1 || true
-  local status
-  status="$(sed -n 's/.*status: \([A-Z]*\).*/\1/p' "$file" | head -1)"
-  printf '%-18s %-5s %-9s ' "$label" "$type" "${status:-TIMEOUT}"
-  awk -v t="$type" '$4==t {printf "%s ",$5}' "$file"
+for cmd in dig awk grep; do command -v "$cmd" >/dev/null || { echo "ERRO: falta $cmd"; exit 2; }; done
+if [[ -t 1 && "${NO_COLOR:-}" == "" ]]; then
+  RED=$'\033[1;31m'; GREEN=$'\033[1;32m'; YELLOW=$'\033[1;33m'; RESET=$'\033[0m'
+else RED=""; GREEN=""; YELLOW=""; RESET=""; fi
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+echo "============================================================"
+echo " VERIFICADOR DE BLOQUEIO DNS / ANABLOCK - $DOMAIN"
+echo "============================================================"
+query() {
+  local label="$1" server="$2" typ="$3" file="$4" st
+  dig @"$server" "$DOMAIN" "$typ" +time=3 +tries=1 +noall +comments +answer >"$file" 2>&1 || true
+  st="$(sed -n 's/.*status: \([A-Z]*\).*/\1/p' "$file" | head -1)"
+  printf '%-12s %-5s %-9s ' "$label" "$typ" "${st:-TIMEOUT}"
+  awk -v t="$typ" '$4==t {printf "%s ",$5}' "$file"
   echo
 }
-for type in A AAAA; do
-  check LOCAL 127.0.0.1 "$type" "$tmp/local.$type"
-  check CLOUDFLARE 1.1.1.1 "$type" "$tmp/cf.$type"
-  check GOOGLE 8.8.8.8 "$type" "$tmp/google.$type"
+for typ in A AAAA; do
+  query LOCAL 127.0.0.1 "$typ" "$TMP/local.$typ"
+  query CLOUDFLARE 1.1.1.1 "$typ" "$TMP/cf.$typ"
+  query GOOGLE 8.8.8.8 "$typ" "$TMP/google.$typ"
 done
 status() { sed -n 's/.*status: \([A-Z]*\).*/\1/p' "$1" | head -1; }
-has_answer() { awk -v t="$2" '$4==t {found=1} END {exit !found}' "$1"; }
-local_good=0; external_good=0; local_bad=0
-for type in A AAAA; do
-  ls="$(status "$tmp/local.$type")"
-  if [[ "$ls" == NOERROR ]] && has_answer "$tmp/local.$type" "$type"; then
-    local_good=1
-  fi
-  if [[ "$ls" == NXDOMAIN || "$ls" == REFUSED || "$ls" == SERVFAIL ]]; then local_bad=1; fi
-  for provider in cf google; do
-    if [[ "$(status "$tmp/$provider.$type")" == NOERROR ]] && has_answer "$tmp/$provider.$type" "$type"; then
-      external_good=1
+ips() { awk -v t="$2" '$4==t {print tolower($5)}' "$1" | sort -u; }
+has_answer() { [[ -n "$(ips "$1" "$2")" ]]; }
+echo
+# Regras ANABLOCK: apenas linhas ativas, incluindo local-zone e local-data.
+# Verifica dominio exato ou subdominio de zona declarada; nao interpreta comentarios.
+ANAFILE="/etc/unbound/anablock.conf"
+RULES="$TMP/rules"
+: >"$RULES"
+if [[ -r "$ANAFILE" ]]; then
+  awk -v d="$DOMAIN" '
+  {
+    line=$0; sub(/[[:space:]]*#.*/, "", line)
+    if (line ~ /^[[:space:]]*#/) next
+    if (match(line, /local-zone:[[:space:]]*"[^"]+"/)) {
+      z=substr(line,RSTART,RLENGTH); sub(/^.*"/,"",z); sub(/".*$/,"",z)
+    }
+    if (line ~ /local-zone:[[:space:]]*"/) {
+      z=line; sub(/^.*local-zone:[[:space:]]*"/,"",z); sub(/".*$/,"",z)
+      z=tolower(z); sub(/\.$/,"",z)
+      if (d==z || (length(d)>length(z) && substr(d,length(d)-length(z))=="."z))
+        print "ZONA " line
+    }
+    if (line ~ /local-data:[[:space:]]*"/) {
+      v=line; sub(/^.*local-data:[[:space:]]*"/,"",v); sub(/".*$/,"",v)
+      split(v,a,/[[:space:]]+/); z=tolower(a[1]); sub(/\.$/,"",z)
+      if (z==d) print "DADO " line
+    }
+  }' "$ANAFILE" >"$RULES"
+fi
+local_ok=0; external_ok=0; local_fail=0; different=0
+for typ in A AAAA; do
+  ls="$(status "$TMP/local.$typ")"
+  if [[ "$ls" == NOERROR ]] && has_answer "$TMP/local.$typ" "$typ"; then local_ok=1; fi
+  if [[ "$ls" == NXDOMAIN || "$ls" == REFUSED || "$ls" == SERVFAIL ]]; then local_fail=1; fi
+  for p in cf google; do
+    if [[ "$(status "$TMP/$p.$typ")" == NOERROR ]] && has_answer "$TMP/$p.$typ" "$typ"; then
+      external_ok=1
+      if has_answer "$TMP/local.$typ" "$typ" && ! diff -q <(ips "$TMP/local.$typ" "$typ") <(ips "$TMP/$p.$typ" "$typ") >/dev/null; then different=1; fi
     fi
   done
 done
-echo
-if ((local_good)); then
-  echo "RESULTADO: NAO HA BLOQUEIO DNS EVIDENTE (dominio resolve localmente)."
-  echo "OBS: isso nao comprova acesso ao site nem exclui filtragem de IP."
-elif ((local_bad && external_good)); then
-  echo "RESULTADO: SUSPEITA DE BLOQUEIO OU FALHA NO DNS LOCAL."
-  echo "O dominio resolve externamente, mas falha localmente."
-  echo "NXDOMAIN, REFUSED ou SERVFAIL tambem podem ter outras causas."
+echo "============================================================"
+if [[ -s "$RULES" ]]; then
+  echo -e "${RED}████████████████████████████████████████████████████████"
+  echo "  BLOQUEADO PELA ANABLOCK - REGRA LOCAL ENCONTRADA"
+  echo -e "████████████████████████████████████████████████████████${RESET}"
+  echo "Arquivo: $ANAFILE"
+  head -n 8 "$RULES"
+  echo "OBS: a regra foi encontrada no arquivo; confirme que esta incluido na configuracao ativa."
+elif ((local_fail && external_ok)); then
+  echo -e "${YELLOW}SUSPEITA DE BLOQUEIO OU FALHA LOCAL${RESET}"
+  echo "O DNS local falhou e pelo menos um DNS externo respondeu."
+elif ((local_ok && different)); then
+  echo -e "${YELLOW}POSSIVEL REDIRECIONAMENTO DNS - VERIFICAR ANABLOCK${RESET}"
+  echo "O DNS local devolveu IP diferente dos externos."
+  echo "Nao foi encontrada regra correspondente em $ANAFILE."
+  echo "Isso tambem pode acontecer normalmente por CDN/geolocalizacao."
+elif ((local_ok)); then
+  echo -e "${GREEN}████████████████████████████████████████████████████████"
+  echo "  NAO BLOQUEADO PELO DNS LOCAL (SEM INDICIOS)"
+  echo -e "████████████████████████████████████████████████████████${RESET}"
 else
-  echo "RESULTADO: INCONCLUSIVO."
-  echo "Verifique conectividade, registros e politicas DNS."
+  echo -e "${YELLOW}INCONCLUSIVO - VERIFICAR DNS E CONECTIVIDADE${RESET}"
 fi
-echo
-echo "OBS: respostas diferentes de IP entre provedores podem ser normais (CDN)."
+echo "============================================================"
+echo "OBS: verifica DNS local; nao identifica bloqueio por firewall, IP ou HTTP."
